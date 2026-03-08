@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <!--
+    Copy this file to StagingBlocker.csproj.user and update the path below
+    to point to your KSP installation directory (the folder that contains GameData).
+  -->
+  <PropertyGroup>
+    <KSPBT_GameRoot>C:\Path\To\Your\KSP\Installation</KSPBT_GameRoot>
+  </PropertyGroup>
+</Project>

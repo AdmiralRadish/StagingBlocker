@@ -1,0 +1,17 @@
+# Visual Studio
+.vscode/
+*.user
+*.suo
+*.userprefs
+*.userosscache
+
+# Build outputs
+bin/
+obj/
+
+# GameData Plugins (built output — not source-controlled)
+GameData/*/Plugins/*.dll
+GameData/*/Plugins/*.pdb
+
+# Rider
+.idea/
