@@ -4,8 +4,8 @@
 *.suo
 *.userprefs
 *.userosscache
+
 *.zip
-*.netkan
 
 # Build outputs
 bin/
@@ -17,3 +17,5 @@ GameData/*/Plugins/*.pdb
 
 # Rider
 .idea/
+
+StagingBlocker.netkan
