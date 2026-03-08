@@ -22,7 +22,7 @@ The following have been set up for CKAN publication:
 
 ### Step 1: Create a GitHub Release
 
-1. Ensure your code is on GitHub: `https://github.com/nickbaumann/StagingBlocker`
+1. Ensure your code is on GitHub
 2. Tag a release:
    ```powershell
    git tag -a v1.0.0 -m "Initial release of Staging Blocker"

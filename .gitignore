@@ -4,6 +4,7 @@
 *.suo
 *.userprefs
 *.userosscache
+CKAN_PUBLICATION_GUIDE.md
 
 # Build outputs
 bin/
