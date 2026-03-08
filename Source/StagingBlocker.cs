@@ -832,15 +832,19 @@ public class StagingBlockerFlight : MonoBehaviour
                        ?? a.GetType("KSP.UI.Screens.ApplicationLauncher");
                 if (alType != null) break;
             }
-            if (alType == null) return;
-
-            var readyProp = alType.GetProperty("Ready", BindingFlags.Public | BindingFlags.Static);
-            bool ready = readyProp != null && (bool)readyProp.GetValue(null, null);
-            if (!ready) return;
+            if (alType == null)
+            {
+                Debug.LogWarning("[StagingBlocker] ApplicationLauncher type not found");
+                return;
+            }
 
             var instanceProp = alType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
             var instance = instanceProp?.GetValue(null, null);
-            if (instance == null) return;
+            if (instance == null)
+            {
+                Debug.Log("[StagingBlocker] ApplicationLauncher.Instance not yet available");
+                return;
+            }
 
             // AppScenes.FLIGHT | AppScenes.MAPVIEW = 0x40 | 0x80 = 192
             Type appScenesType = alType.GetNestedType("AppScenes", BindingFlags.Public);
@@ -849,14 +853,19 @@ public class StagingBlockerFlight : MonoBehaviour
                 : (object)192;
 
             Type ruitType = alType.Assembly.GetType("RUIToggleButton");
-            Type onTrueType  = ruitType?.GetNestedType("OnTrue");
-            Type onFalseType = ruitType?.GetNestedType("OnFalse");
-            Delegate onTrue  = onTrueType  != null
-                ? Delegate.CreateDelegate(onTrueType,  this, "OnAppTrue")
-                : (Delegate)(UnityEngine.Events.UnityAction)OnAppTrue;
-            Delegate onFalse = onFalseType != null
-                ? Delegate.CreateDelegate(onFalseType, this, "OnAppFalse")
-                : (Delegate)(UnityEngine.Events.UnityAction)OnAppFalse;
+            
+            // Find the Callback delegate type
+            Type callbackType = alType.Assembly.GetType("Callback");
+            if (callbackType == null)
+            {
+                Debug.LogWarning("[StagingBlocker] Callback delegate type not found");
+                return;
+            }
+            
+            Delegate onTrue = Delegate.CreateDelegate(callbackType, null, 
+                typeof(StagingBlockerFlight).GetMethod("StaticOnAppTrue", BindingFlags.Static | BindingFlags.NonPublic));
+            Delegate onFalse = Delegate.CreateDelegate(callbackType, null, 
+                typeof(StagingBlockerFlight).GetMethod("StaticOnAppFalse", BindingFlags.Static | BindingFlags.NonPublic));
 
             Texture2D icon = GameDatabase.Instance.GetTexture("StagingBlocker/Textures/icon", false);
             if (icon == null)
@@ -869,12 +878,15 @@ public class StagingBlockerFlight : MonoBehaviour
 
             var addMethod = alType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
                 .FirstOrDefault(m => m.Name == "AddModApplication" && m.GetParameters().Length == 8);
-            if (addMethod != null)
+            if (addMethod == null)
             {
-                _appButton = addMethod.Invoke(instance, new object[]
-                    { onTrue, onFalse, null, null, null, null, scenes, icon });
-                Debug.Log("[StagingBlocker] AppLauncher button added: " + (_appButton != null));
+                Debug.LogWarning("[StagingBlocker] AddModApplication(8) method not found");
+                return;
             }
+
+            _appButton = addMethod.Invoke(instance, new object[]
+                { onTrue, onFalse, null, null, null, null, scenes, icon });
+            Debug.Log("[StagingBlocker] AppLauncher button added successfully: " + (_appButton != null));
         }
         catch (Exception e)
         {
