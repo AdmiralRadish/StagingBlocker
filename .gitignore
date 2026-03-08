@@ -5,6 +5,7 @@
 *.userprefs
 *.userosscache
 *.zip
+*.netkan
 
 # Build outputs
 bin/
