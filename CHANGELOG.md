@@ -8,13 +8,10 @@
 - Per-vessel staging block toggle (enable/disable protection per vessel)
 - Staging Manager GUI with manual stage trigger button
 - Stock AppLauncher integration
-- Optional ToolbarController integration
 - Window resizing and repositioning
 - Full LunaMultiplayer support with shared vessel state
 - Fallback hotkey (↑↓←→ together) to toggle window if toolbar fails
 - Detailed logging for debugging
-- Toolbar health monitoring and validation after vessel switches
-- Static delegate architecture for robust toolbar button callbacks
 
 ### Features
 - **Safe Default**: Staging is blocked by default; toggle per-vessel

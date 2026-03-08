@@ -182,7 +182,7 @@ public class StagingBlockerScenario : ScenarioModule
 //  Responsibilities:
 //    • Block spacebar staging unless modifier key is held
 //    • Provide STAGING MANAGER GUI with manual stage trigger
-//    • Stock AppLauncher + optional ToolbarController button
+//    • Stock AppLauncher integration
 // ─────────────────────────────────────────────────────────────────────────────
 [KSPAddon(KSPAddon.Startup.Flight, false)]
 public class StagingBlockerFlight : MonoBehaviour
@@ -214,17 +214,7 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Stock AppLauncher button ───────────────────────────────────────────────
     private object _appButton = null;
-
-    // ── ToolbarController button (optional mod, persisted across vessel switches)
-    private static bool _tcCreated = false;
-    private static bool _tcInitAttempted = false;  // flag to prevent repeated attempts
-    private static bool _tcToolbarRegistered = false;  // flag to prevent re-registering AddToAllToolbars
-    private static GameObject _tcGO = null;
-    private Component _tcButton = null;
     
-    // ── Current instance for static toolbar callbacks ────────────────────────
-    private static StagingBlockerFlight _currentInstance = null;
-
     // ── Input lock ID ─────────────────────────────────────────────────────────
     private const string LOCK_ID = "StagingBlocker_SpaceLock";
 
@@ -234,10 +224,6 @@ public class StagingBlockerFlight : MonoBehaviour
     // ── Active vessel tracking (for per-vessel key load/save) ─────────────────
     private string _currentVesselId = null;
     
-    // ── Toolbar button monitoring ──────────────────────────────────────────────
-    private float _lastToolbarStatusCheck = 0f;
-    private const float TOOLBAR_STATUS_CHECK_INTERVAL = 5f;  // Check every 5 seconds
-
     // ── Cached reflection handles for StageManager ────────────────────────────
     private static MethodInfo _activateNextStageMethod = null;
     private static bool _stagingMethodSearched = false;
@@ -246,9 +232,6 @@ public class StagingBlockerFlight : MonoBehaviour
     void Start()
     {
         Debug.Log("[StagingBlocker] Flight addon started");
-        
-        // Update the current instance so static toolbar callbacks can forward to us
-        _currentInstance = this;
 
         // Log multiplayer status
         if (LunaMultiplayerHelper.IsLunaEnabled)
@@ -279,9 +262,6 @@ public class StagingBlockerFlight : MonoBehaviour
         // Stock toolbar button
         GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
         StartCoroutine(RetryAppLauncherButton());
-
-        // ToolbarController button (optional mod)
-        TryCreateToolbarControllerButton();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -292,65 +272,11 @@ public class StagingBlockerFlight : MonoBehaviour
             SaveToScenario();                        // persist the outgoing vessel's state first
             LoadVesselState(v);                      // load the incoming vessel's state
             ApplyStagingLock(_stagingBlocked);       // apply the new vessel's block toggle
-            Debug.Log("[StagingBlocker] Vessel switch complete. Toolbar state preserved.");
-            
-            // Validate toolbar state after vessel change
-            StartCoroutine(ValidateToolbarAfterVesselSwitch());
+            Debug.Log("[StagingBlocker] Vessel switch complete");
         }
         catch (Exception e)
         {
             Debug.LogWarning("[StagingBlocker] Error during vessel change: " + e.Message);
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Validates and repairs toolbar state after vessel switch
-    // ─────────────────────────────────────────────────────────────────────────
-    IEnumerator ValidateToolbarAfterVesselSwitch()
-    {
-        yield return new WaitForSeconds(0.1f);  // Brief delay to let vessel change stabilize
-        
-        try
-        {
-            bool toolbarNeedsRepair = false;
-            
-            // Check if toolbar controller button is still valid
-            if (_tcButton != null && _tcGO != null)
-            {
-                // Verify the GameObject is still active in scene
-                if (!_tcGO.activeInHierarchy)
-                {
-                    Debug.LogWarning("[StagingBlocker] ToolbarController GameObject became inactive after vessel switch!");
-                    _tcGO.SetActive(true);
-                }
-                
-                // Check if component still exists
-                if (_tcButton == null || _tcGO.GetComponent(_tcButton.GetType()) != _tcButton)
-                {
-                    Debug.LogWarning("[StagingBlocker] ToolbarController component is no longer valid after vessel switch!");
-                    toolbarNeedsRepair = true;
-                }
-            }
-            
-            // Check if AppLauncher button is still valid
-            if (_appButton != null)
-            {
-                // Buttons should remain valid, but log just in case
-                Debug.Log("[StagingBlocker] AppLauncher button state valid after vessel switch");
-            }
-            
-            if (toolbarNeedsRepair)
-            {
-                Debug.LogWarning("[StagingBlocker] Attempting toolbar repair after vessel switch...");
-                // Don't recreate, just flag for next retry opportunity
-                // The toolbar should repair itself naturally
-            }
-            
-            Debug.Log("[StagingBlocker] Toolbar validation complete after vessel switch");
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning("[StagingBlocker] Error validating toolbar after vessel switch: " + e.Message);
         }
     }
 
@@ -428,45 +354,6 @@ public class StagingBlockerFlight : MonoBehaviour
         if (_stagingBlocked && Input.GetKey(modifierKey) && Input.GetKeyDown(KeyCode.Space))
         {
             TriggerNextStage();
-        }
-
-        // Monitor toolbar button health periodically
-        _lastToolbarStatusCheck += Time.deltaTime;
-        if (_lastToolbarStatusCheck >= TOOLBAR_STATUS_CHECK_INTERVAL)
-        {
-            _lastToolbarStatusCheck = 0f;
-            MonitorToolbarHealth();
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Monitors toolbar health and attempts recovery if button becomes unresponsive
-    // ─────────────────────────────────────────────────────────────────────────
-    void MonitorToolbarHealth()
-    {
-        try
-        {
-            // Check if ToolbarController button is still valid
-            if (_tcGO != null && _tcButton != null)
-            {
-                if (!_tcGO.activeInHierarchy)
-                {
-                    Debug.LogWarning("[StagingBlocker] Toolbar button detected as inactive. Reactivating...");
-                    _tcGO.SetActive(true);
-                }
-                
-                // Verify component still exists on GameObject
-                var comp = _tcGO.GetComponent(_tcButton.GetType());
-                if (comp == null)
-                {
-                    Debug.LogWarning("[StagingBlocker] Toolbar button component missing from GameObject!");
-                    _tcButton = null;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning("[StagingBlocker] Toolbar health check failed: " + e.Message);
         }
     }
 
@@ -852,8 +739,6 @@ public class StagingBlockerFlight : MonoBehaviour
                 ? (object)((int)Enum.Parse(appScenesType, "FLIGHT") | (int)Enum.Parse(appScenesType, "MAPVIEW"))
                 : (object)192;
 
-            Type ruitType = alType.Assembly.GetType("RUIToggleButton");
-            
             // Find the Callback delegate type
             Type callbackType = alType.Assembly.GetType("Callback");
             if (callbackType == null)
@@ -862,10 +747,8 @@ public class StagingBlockerFlight : MonoBehaviour
                 return;
             }
             
-            Delegate onTrue = Delegate.CreateDelegate(callbackType, null, 
-                typeof(StagingBlockerFlight).GetMethod("StaticOnAppTrue", BindingFlags.Static | BindingFlags.NonPublic));
-            Delegate onFalse = Delegate.CreateDelegate(callbackType, null, 
-                typeof(StagingBlockerFlight).GetMethod("StaticOnAppFalse", BindingFlags.Static | BindingFlags.NonPublic));
+            Delegate onTrue = Delegate.CreateDelegate(callbackType, this, "OnAppTrue");
+            Delegate onFalse = Delegate.CreateDelegate(callbackType, this, "OnAppFalse");
 
             Texture2D icon = GameDatabase.Instance.GetTexture("StagingBlocker/Textures/icon", false);
             if (icon == null)
@@ -930,189 +813,6 @@ public class StagingBlockerFlight : MonoBehaviour
         }
     }
 
-    // Static wrapper for toolbar callbacks - forwards to current instance
-    // This allows the Toolbar Controller to call these without breaking on vessel switches
-    private static void StaticOnAppTrue()
-    {
-        if (_currentInstance != null)
-            _currentInstance.OnAppTrue();
-    }
-
-    private static void StaticOnAppFalse()
-    {
-        if (_currentInstance != null)
-            _currentInstance.OnAppFalse();
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  ToolbarController (optional mod)
-    // ─────────────────────────────────────────────────────────────────────────
-    void TryCreateToolbarControllerButton()
-    {
-        try
-        {
-            // If already created successfully, skip entirely
-            if (_tcCreated) return;
-            
-            // If we've already attempted creation (even if it failed), don't try again
-            // This prevents repeated attempts that could cause duplicates
-            if (_tcInitAttempted) return;
-            
-            _tcInitAttempted = true;  // Mark that we've attempted, even if it fails
-
-            Type tcType = null;
-            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                tcType = a.GetType("ToolbarControl_NS.ToolbarControl");
-                if (tcType != null) break;
-            }
-            if (tcType == null)
-            {
-                Debug.Log("[StagingBlocker] ToolbarController not present — using stock AppLauncher only");
-                return;
-            }
-
-            // RegisterMod
-            var registerMod = tcType.GetMethod("RegisterMod", BindingFlags.Public | BindingFlags.Static);
-            if (registerMod != null)
-            {
-                try
-                {
-                    var rp = registerMod.GetParameters();
-                    string[] strVals = { "StagingBlocker", "StagingBlockerButton", "Staging Blocker", "StagingBlocker/Textures/icon" };
-                    int strIdx = 0;
-                    var args = new object[rp.Length];
-                    for (int i = 0; i < rp.Length; i++)
-                    {
-                        if (rp[i].ParameterType == typeof(string))
-                            args[i] = strIdx < strVals.Length ? strVals[strIdx++] : "";
-                        else if (rp[i].ParameterType == typeof(bool))
-                            args[i] = rp[i].HasDefaultValue ? rp[i].DefaultValue : true;
-                        else
-                            args[i] = rp[i].HasDefaultValue ? rp[i].DefaultValue : null;
-                    }
-                    registerMod.Invoke(null, args);
-                }
-                catch (Exception ex) { Debug.LogWarning("[StagingBlocker] RegisterMod failed: " + ex.Message); }
-            }
-
-            _tcGO = new GameObject("StagingBlockerToolbar");
-            DontDestroyOnLoad(_tcGO);
-            _tcButton = (Component)_tcGO.AddComponent(tcType);
-            _tcCreated = true;  // Mark component created
-            
-            // Only call AddToAllToolbars() once per session to avoid duplicate entries
-            if (!_tcToolbarRegistered)
-            {
-                Type tcClickType = tcType.GetNestedType("TC_ClickHandler",
-                    BindingFlags.Public | BindingFlags.NonPublic);
-                if (tcClickType == null)
-                {
-                    Debug.LogWarning("[StagingBlocker] TC_ClickHandler type not found");
-                    return;
-                }
-                
-                // Use static wrapper methods so callbacks survive addon recreation on vessel switches
-                Delegate tcOnTrue = null;
-                Delegate tcOnFalse = null;
-                try
-                {
-                    tcOnTrue = Delegate.CreateDelegate(tcClickType, null, typeof(StagingBlockerFlight).GetMethod("StaticOnAppTrue", BindingFlags.Static | BindingFlags.NonPublic));
-                    tcOnFalse = Delegate.CreateDelegate(tcClickType, null, typeof(StagingBlockerFlight).GetMethod("StaticOnAppFalse", BindingFlags.Static | BindingFlags.NonPublic));
-                    Debug.Log("[StagingBlocker] TC delegates created with static forwarding");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError("[StagingBlocker] Failed to create TC delegates: " + ex.Message);
-                    return;
-                }
-
-                var addMethod8 = tcType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                    .FirstOrDefault(m => m.Name == "AddToAllToolbars" && m.GetParameters().Length == 8);
-                if (addMethod8 == null) { Debug.LogWarning("[StagingBlocker] AddToAllToolbars(8) not found"); return; }
-
-                Type appScenesType2 = addMethod8.GetParameters()[2].ParameterType;
-                object flightScene = Enum.Parse(appScenesType2, "FLIGHT");
-
-                try
-                {
-                    addMethod8.Invoke(_tcButton, new object[]
-                    {
-                        tcOnTrue, tcOnFalse, flightScene,
-                        "StagingBlocker", "StagingBlockerButton",
-                        "StagingBlocker/Textures/icon",
-                        "StagingBlocker/Textures/icon",
-                        "Staging Blocker"
-                    });
-                    _tcToolbarRegistered = true;
-                    Debug.Log("[StagingBlocker] ToolbarController button registered (one-time)");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError("[StagingBlocker] AddToAllToolbars invocation failed: " + ex.Message);
-                    return;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning("[StagingBlocker] ToolbarController init failed: " + e.GetType().Name + ": " + e.Message);
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  Reset toolbar buttons (removes and recreates them)
-    // ─────────────────────────────────────────────────────────────────────────
-    void ResetToolbarButtons()
-    {
-        Debug.Log("[StagingBlocker] Resetting toolbar buttons (this may take a moment)...");
-        
-        // Remove stock AppLauncher button
-        if (_appButton != null)
-        {
-            try
-            {
-                Type alType = null;
-                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    alType = a.GetType("ApplicationLauncher");
-                    if (alType != null) break;
-                }
-                if (alType != null)
-                {
-                    var inst = alType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
-                                    ?.GetValue(null, null);
-                    var rem  = alType.GetMethod("RemoveModApplication", BindingFlags.Public | BindingFlags.Instance);
-                    rem?.Invoke(inst, new object[] { _appButton });
-                    Debug.Log("[StagingBlocker] AppLauncher button removed for reset");
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[StagingBlocker] Failed to remove AppLauncher button: " + e.Message);
-            }
-            _appButton = null;
-        }
-
-        // Destroy ToolbarController button
-        if (_tcGO != null)
-        {
-            try { Destroy(_tcGO); } catch { }
-            _tcGO = null;
-            _tcButton = null;
-            Debug.Log("[StagingBlocker] ToolbarController button removed for reset");
-        }
-        
-        // Reset creation flags to allow re-initialization
-        _tcCreated = false;
-        _tcInitAttempted = false;
-
-        // Recreate buttons
-        Debug.Log("[StagingBlocker] Toolbar buttons reset complete. Recreating...");
-        StartCoroutine(RetryAppLauncherButton());
-        TryCreateToolbarControllerButton();
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     //  Cleanup
     // ─────────────────────────────────────────────────────────────────────────
@@ -1148,17 +848,6 @@ public class StagingBlockerFlight : MonoBehaviour
             }
             catch { }
             _appButton = null;
-        }
-
-        // Destroy ToolbarController button only when truly leaving flight
-        if (!HighLogic.LoadedSceneIsFlight && _tcGO != null)
-        {
-            try { Destroy(_tcGO); } catch { }
-            _tcGO = null;
-            _tcButton = null;
-            _tcCreated = false;
-            _tcToolbarRegistered = false; // Reset so button can be re-registered if returning to flight
-            _currentInstance = null;
         }
     }
 }

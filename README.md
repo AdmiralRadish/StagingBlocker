@@ -7,7 +7,7 @@ A Kerbal Space Program mod that prevents accidental staging by requiring a modif
 - **Spacebar Protection**: Blocks spacebar staging unless a modifier key is held
 - **Per-Vessel Configuration**: Set different modifier keys for different vessels
 - **Multiplayer Support**: Full LunaMultiplayer compatibility with shared vessel state
-- **Optional Toolbar Integration**: Works with both stock AppLauncher and ToolbarController
+- **Stock Toolbar Integration**: Uses the default KSP AppLauncher
 - **Manual Stage Trigger**: Big red button in the staging manager GUI for manual stage activation
 - **Window Resizing**: Drag edges to resize the staging manager window
 - **Fallback Hotkey**: All 4 arrow keys pressed together will toggle the window if no toolbar
@@ -21,7 +21,7 @@ A Kerbal Space Program mod that prevents accidental staging by requiring a modif
 ## Requirements
 
 - Kerbal Space Program 1.12.5
-- No hard dependencies (ToolbarController is optional)
+- No hard dependencies
 
 ## Usage
 ### Basic Controls
@@ -29,10 +29,8 @@ A Kerbal Space Program mod that prevents accidental staging by requiring a modif
 - **Change Modifier Key**: Click "Change" in the window to rebind
 - **Toggle Blocking**: Use the "Modifier Key Required" button to enable/disable
 - **Manual Staging**: Click the red "ACTIVATE STAGE" button in the window
-
-### Toolbar Controller Support
-- Left-click the toolbar button to show/hide the staging manager window
-- If the toolbar button becomes unresponsive, press all 4 arrow keys ↑↓←→ together
+- **Toolbar Button**: Left-click to show/hide the staging manager window
+- **Fallback Hotkey**: Press all 4 arrow keys ↑↓←→ together to toggle window
 
 ## Features
 ### Staging Manager Window
@@ -71,7 +69,6 @@ Licensed under the MIT License - see LICENSE file for details.
 
 ## Credits
 
-- Uses reflection to detect and integrate with ToolbarController (optional)
 - Full LunaMultiplayer compatibility through KSP scenario synchronization
 - Inspired by the need to prevent accidental stagings in complex vehicles
 - Uses KerbalBuildTools 'https://www.nuget.org/packages/KSPBuildTools'
