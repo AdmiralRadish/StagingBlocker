@@ -7,14 +7,14 @@ using UnityEngine;
 #pragma warning disable CS8618, CS8600, CS8601, CS8625
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  LunaMultiplayerHelper — optional detection of LunaMultiplayer (LMP)
+//  SBLunaHelper — optional detection of LunaMultiplayer (LMP)
 //
 //  Uses reflection so there is no hard dependency on LMP assemblies.
 //  The modifier hotkey is stored globally (no player prefix) in
 //  StagingBlockerScenario, so KSP/LMP scenario-sync automatically propagates
 //  the same key to every connected player — no additional work needed.
 // ─────────────────────────────────────────────────────────────────────────────
-public static class LunaMultiplayerHelper
+public static class SBLunaHelper
 {
     private static bool? _isLunaAvailable = null;
     private static string _cachedPlayerName = null;
@@ -249,13 +249,21 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void Start()
     {
+        // Awake() may have called Destroy(this) if a duplicate was detected, but Unity still
+        // invokes Start() on the same frame. Abort before subscribing to any events.
+        if (_activeInstance != this)
+        {
+            Debug.LogWarning("[StagingBlocker] Start() called on non-active duplicate instance; aborting.");
+            return;
+        }
+
         Debug.Log("[StagingBlocker] Flight addon started");
 
         // Log multiplayer status
-        if (LunaMultiplayerHelper.IsLunaEnabled)
+        if (SBLunaHelper.IsLunaEnabled)
         {
             Debug.Log("[StagingBlocker] LunaMultiplayer detected — modifier key is shared across all " +
-                      "players via scenario storage (player: " + LunaMultiplayerHelper.GetCurrentPlayerName() + ")");
+                      "players via scenario storage (player: " + SBLunaHelper.GetCurrentPlayerName() + ")");
         }
         else
         {
@@ -720,9 +728,15 @@ public class StagingBlockerFlight : MonoBehaviour
         for (int i = 0; i < 30 && _appButton == null; i++)
         {
             AddAppLauncherButton("retry-" + i);
-            if (_appButton != null) yield break;
+            if (_appButton != null)
+            {
+                _retryButtonCoroutine = null;
+                yield break;
+            }
             yield return new WaitForSeconds(1f);
         }
+
+        _retryButtonCoroutine = null;
     }
 
     void AddAppLauncherButton(string source)
@@ -740,7 +754,7 @@ public class StagingBlockerFlight : MonoBehaviour
             }
             if (alType == null)
             {
-                Debug.LogWarning("[StagingBlocker] ApplicationLauncher type not found");
+                Debug.LogWarning("[StagingBlocker] AppLauncher add failed (" + source + "): type not found");
                 return;
             }
 
@@ -748,7 +762,7 @@ public class StagingBlockerFlight : MonoBehaviour
             var instance = instanceProp?.GetValue(null, null);
             if (instance == null)
             {
-                Debug.Log("[StagingBlocker] ApplicationLauncher.Instance not yet available");
+                Debug.Log("[StagingBlocker] AppLauncher add deferred (" + source + "): Instance not yet available");
                 return;
             }
 
@@ -762,7 +776,7 @@ public class StagingBlockerFlight : MonoBehaviour
             Type callbackType = alType.Assembly.GetType("Callback");
             if (callbackType == null)
             {
-                Debug.LogWarning("[StagingBlocker] Callback delegate type not found");
+                Debug.LogWarning("[StagingBlocker] AppLauncher add failed (" + source + "): Callback type not found");
                 return;
             }
             
@@ -782,17 +796,17 @@ public class StagingBlockerFlight : MonoBehaviour
                 .FirstOrDefault(m => m.Name == "AddModApplication" && m.GetParameters().Length == 8);
             if (addMethod == null)
             {
-                Debug.LogWarning("[StagingBlocker] AddModApplication(8) method not found");
+                Debug.LogWarning("[StagingBlocker] AppLauncher add failed (" + source + "): AddModApplication(8) not found");
                 return;
             }
 
             _appButton = addMethod.Invoke(instance, new object[]
                 { onTrue, onFalse, null, null, null, null, scenes, icon });
-            Debug.Log("[StagingBlocker] AddAppLauncherButton(" + source + ") completed; button assigned=" + (_appButton != null));
+            Debug.Log("[StagingBlocker] AppLauncher add " + (_appButton != null ? "succeeded" : "returned null") + " (" + source + ")");
         }
         catch (Exception e)
         {
-            Debug.LogWarning("[StagingBlocker] AddAppLauncherButton(" + source + ") failed: " + e.GetType().Name + ": " + e.Message);
+            Debug.LogWarning("[StagingBlocker] AppLauncher add failed (" + source + "): " + e.GetType().Name + ": " + e.Message);
         }
         finally
         {
@@ -861,6 +875,7 @@ public class StagingBlockerFlight : MonoBehaviour
         // Remove stock AppLauncher button
         if (_appButton != null)
         {
+            bool removed = false;
             try
             {
                 Type alType = null;
@@ -875,10 +890,20 @@ public class StagingBlockerFlight : MonoBehaviour
                     var inst = alType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
                                     ?.GetValue(null, null);
                     var rem  = alType.GetMethod("RemoveModApplication", BindingFlags.Public | BindingFlags.Instance);
-                    rem?.Invoke(inst, new object[] { _appButton });
+                    if (rem != null && inst != null)
+                    {
+                        Debug.Log("[StagingBlocker] AppLauncher remove attempt starting.");
+                        rem.Invoke(inst, new object[] { _appButton });
+                        removed = true;
+                    }
                 }
             }
-            catch { }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[StagingBlocker] AppLauncher remove failed: " + e.GetType().Name + ": " + e.Message);
+            }
+
+            Debug.Log("[StagingBlocker] AppLauncher remove " + (removed ? "succeeded." : "could not run (instance/method missing)."));
             _appButton = null;
         }
     }
