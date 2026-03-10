@@ -187,6 +187,8 @@ public class StagingBlockerScenario : ScenarioModule
 [KSPAddon(KSPAddon.Startup.Flight, false)]
 public class StagingBlockerFlight : MonoBehaviour
 {
+    private static StagingBlockerFlight _activeInstance = null;
+
     // ── Window / UI state ─────────────────────────────────────────────────────
     private Rect windowRect = new Rect(20, 80, 310, 270);
     private bool showWindow = true;
@@ -214,6 +216,8 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Stock AppLauncher button ───────────────────────────────────────────────
     private object _appButton = null;
+    private bool _isAddingAppButton = false;
+    private Coroutine _retryButtonCoroutine = null;
     
     // ── Input lock ID ─────────────────────────────────────────────────────────
     private const string LOCK_ID = "StagingBlocker_SpaceLock";
@@ -227,6 +231,20 @@ public class StagingBlockerFlight : MonoBehaviour
     // ── Cached reflection handles for StageManager ────────────────────────────
     private static MethodInfo _activateNextStageMethod = null;
     private static bool _stagingMethodSearched = false;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    void Awake()
+    {
+        // Defensive singleton guard. If multiple flight addons are instantiated,
+        // each one could register its own AppLauncher button.
+        if (_activeInstance != null && _activeInstance != this)
+        {
+            Debug.LogWarning("[StagingBlocker] Duplicate flight addon instance detected; destroying duplicate");
+            Destroy(this);
+            return;
+        }
+        _activeInstance = this;
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     void Start()
@@ -261,7 +279,7 @@ public class StagingBlockerFlight : MonoBehaviour
 
         // Stock toolbar button
         GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
-        StartCoroutine(RetryAppLauncherButton());
+        _retryButtonCoroutine = StartCoroutine(RetryAppLauncherButton());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -694,22 +712,23 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void OnGUIAppLauncherReady()
     {
-        AddAppLauncherButton();
+        AddAppLauncherButton("onGUIApplicationLauncherReady");
     }
     
     IEnumerator RetryAppLauncherButton()
     {
         for (int i = 0; i < 30 && _appButton == null; i++)
         {
-            AddAppLauncherButton();
+            AddAppLauncherButton("retry-" + i);
             if (_appButton != null) yield break;
             yield return new WaitForSeconds(1f);
         }
     }
 
-    void AddAppLauncherButton()
+    void AddAppLauncherButton(string source)
     {
-        if (_appButton != null) return;
+        if (_appButton != null || _isAddingAppButton) return;
+        _isAddingAppButton = true;
         try
         {
             Type alType = null;
@@ -769,11 +788,15 @@ public class StagingBlockerFlight : MonoBehaviour
 
             _appButton = addMethod.Invoke(instance, new object[]
                 { onTrue, onFalse, null, null, null, null, scenes, icon });
-            Debug.Log("[StagingBlocker] AppLauncher button added successfully: " + (_appButton != null));
+            Debug.Log("[StagingBlocker] AddAppLauncherButton(" + source + ") completed; button assigned=" + (_appButton != null));
         }
         catch (Exception e)
         {
-            Debug.LogWarning("[StagingBlocker] AppLauncher button failed: " + e.GetType().Name + ": " + e.Message);
+            Debug.LogWarning("[StagingBlocker] AddAppLauncherButton(" + source + ") failed: " + e.GetType().Name + ": " + e.Message);
+        }
+        finally
+        {
+            _isAddingAppButton = false;
         }
     }
 
@@ -818,6 +841,9 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void OnDestroy()
     {
+        if (_activeInstance == this)
+            _activeInstance = null;
+
         // Always remove the staging lock when leaving flight
         InputLockManager.RemoveControlLock(LOCK_ID);
         Debug.Log("[StagingBlocker] Staging lock removed");
@@ -826,6 +852,11 @@ public class StagingBlockerFlight : MonoBehaviour
         SaveToScenario();
 
         GameEvents.onGUIApplicationLauncherReady.Remove(OnGUIAppLauncherReady);
+        if (_retryButtonCoroutine != null)
+        {
+            StopCoroutine(_retryButtonCoroutine);
+            _retryButtonCoroutine = null;
+        }
 
         // Remove stock AppLauncher button
         if (_appButton != null)
@@ -835,7 +866,8 @@ public class StagingBlockerFlight : MonoBehaviour
                 Type alType = null;
                 foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    alType = a.GetType("ApplicationLauncher");
+                    alType = a.GetType("ApplicationLauncher")
+                          ?? a.GetType("KSP.UI.Screens.ApplicationLauncher");
                     if (alType != null) break;
                 }
                 if (alType != null)
