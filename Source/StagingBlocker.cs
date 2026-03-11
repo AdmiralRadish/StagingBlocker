@@ -435,7 +435,7 @@ public class StagingBlockerFlight : MonoBehaviour
         else
         {
             InputLockManager.RemoveControlLock(LOCK_ID);
-            Debug.Log("[StagingBlocker] Staging lock OFF — SPACE acts normally");
+            Debug.Log("[StagingBlocker] Staging lock OFF — stage key acts normally");
         }
         SaveToScenario();
     }
@@ -489,23 +489,23 @@ public class StagingBlockerFlight : MonoBehaviour
         switch (_stagingMode)
         {
             case StagingMode.ModifierKey:
-                if (_stagingBlocked && Input.GetKey(modifierKey) && Input.GetKeyDown(KeyCode.Space))
+                if (_stagingBlocked && Input.GetKey(modifierKey) && IsStageKeyDown())
                     TriggerNextStage();
                 break;
 
             case StagingMode.PressAndHold:
-                if (Input.GetKeyDown(KeyCode.Space))
+                if (IsStageKeyDown())
                 {
                     _isHolding = true;
                     _holdTimer = _holdDuration;
                 }
-                else if (_isHolding && !Input.GetKey(KeyCode.Space))
+                else if (_isHolding && !IsStageKeyHeld())
                 {
                     // released before threshold
                     _isHolding = false;
                     _holdTimer = _holdDuration;
                 }
-                if (_isHolding && Input.GetKey(KeyCode.Space))
+                if (_isHolding && IsStageKeyHeld())
                 {
                     _holdTimer -= Time.deltaTime;
                     if (_holdTimer <= 0f)
@@ -518,7 +518,7 @@ public class StagingBlockerFlight : MonoBehaviour
                 break;
 
             case StagingMode.DoubleTap:
-                if (Input.GetKeyDown(KeyCode.Space))
+                if (IsStageKeyDown())
                 {
                     float now = Time.time;
                     if (_lastTapTime > 0f && (now - _lastTapTime) <= _doubleTapDelay)
@@ -745,6 +745,8 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void DrawWindow(int id)
     {
+        string stageKeyName = GetStageKeyDisplayName();
+
         // ── X (close) button — top-right of title bar ────────────────────────
         const float CLOSE_W = 18f;
         const float CLOSE_H = 16f;
@@ -826,7 +828,7 @@ public class StagingBlockerFlight : MonoBehaviour
 
                 if (_stagingBlocked)
                 {
-                    GUILayout.Label(">>Hold Modifier Key + Press SPACE to STAGE<<", GUI.skin.label);
+                    GUILayout.Label(">>Hold Modifier Key + Press " + stageKeyName + " to STAGE<<", GUI.skin.label);
                     GUILayout.Space(2);
 
                     GUILayout.BeginHorizontal();
@@ -867,7 +869,7 @@ public class StagingBlockerFlight : MonoBehaviour
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(2);
-                GUILayout.Label("Hold SPACE for " + _holdDuration.ToString("F1") + "s to activate stage.", GUI.skin.label);
+                GUILayout.Label("Hold " + stageKeyName + " for " + _holdDuration.ToString("F1") + "s to activate stage.", GUI.skin.label);
 
                 if (_isHolding)
                 {
@@ -880,7 +882,7 @@ public class StagingBlockerFlight : MonoBehaviour
             case StagingMode.DoubleTap:
             {
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("Max Tap Delay (s):", GUILayout.Width(140));
+                GUILayout.Label("Double-Tap Speed (s):", GUILayout.Width(140));
                 string newTapStr = GUILayout.TextField(_doubleTapDelayStr, GUILayout.Width(55));
                 if (newTapStr != _doubleTapDelayStr)
                 {
@@ -892,11 +894,11 @@ public class StagingBlockerFlight : MonoBehaviour
                         SaveToScenario();
                     }
                 }
-                GUILayout.Label("(0.1–2)", GUILayout.Width(45));
+                GUILayout.Label("(0.1 – 2 sec)", GUILayout.Width(45));
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(2);
-                GUILayout.Label("Double-tap SPACE within " + _doubleTapDelay.ToString("F2") + "s to activate stage.", GUI.skin.label);
+                GUILayout.Label("Double-tap " + stageKeyName + " within " + _doubleTapDelay.ToString("F2") + "s to activate stage.", GUI.skin.label);
                 break;
             }
         }
@@ -921,6 +923,47 @@ public class StagingBlockerFlight : MonoBehaviour
             case KeyCode.RightShift:   return "Right Shift";
             default:                   return kc.ToString();
         }
+    }
+
+    bool IsStageKeyDown()
+    {
+        try { return GameSettings.LAUNCH_STAGES.GetKeyDown(); }
+        catch { return Input.GetKeyDown(KeyCode.Space); }
+    }
+
+    bool IsStageKeyHeld()
+    {
+        try { return GameSettings.LAUNCH_STAGES.GetKey(); }
+        catch { return Input.GetKey(KeyCode.Space); }
+    }
+
+    string GetStageKeyDisplayName()
+    {
+        try
+        {
+            string primary = StageBindingPartDisplayName(GameSettings.LAUNCH_STAGES.primary);
+            string secondary = StageBindingPartDisplayName(GameSettings.LAUNCH_STAGES.secondary);
+
+            if (!string.IsNullOrEmpty(primary) && !string.IsNullOrEmpty(secondary))
+                return primary + " / " + secondary;
+            if (!string.IsNullOrEmpty(primary)) return primary;
+            if (!string.IsNullOrEmpty(secondary)) return secondary;
+        }
+        catch { }
+        return "SPACE";
+    }
+
+    string StageBindingPartDisplayName(object bindingPart)
+    {
+        if (bindingPart == null) return "";
+        string raw = bindingPart.ToString();
+        if (string.IsNullOrEmpty(raw) || string.Equals(raw, "None", StringComparison.OrdinalIgnoreCase))
+            return "";
+
+        if (Enum.TryParse(raw, out KeyCode kc))
+            return ModifierKeyDisplayName(kc);
+
+        return raw;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
