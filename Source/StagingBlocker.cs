@@ -7,6 +7,11 @@ using UnityEngine;
 #pragma warning disable CS8618, CS8600, CS8601, CS8625
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Staging activation mode
+// ─────────────────────────────────────────────────────────────────────────────
+public enum StagingMode { ModifierKey = 0, PressAndHold = 1, DoubleTap = 2 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  SBLunaHelper — optional detection of LunaMultiplayer (LMP)
 //
 //  Uses reflection so there is no hard dependency on LMP assemblies.
@@ -106,6 +111,46 @@ public class StagingBlockerScenario : ScenarioModule
     private const KeyCode DEFAULT_KEY     = KeyCode.BackQuote; // tilde ~
     private const string  KEY_PREFIX      = "vesselKey_";
     private const string  BLOCKED_PREFIX  = "vesselBlocked_";
+    private const string  MODE_PREFIX     = "vesselMode_";
+    private const string  HOLD_PREFIX     = "vesselHold_";
+    private const string  TAP_PREFIX      = "vesselTap_";
+
+    public readonly Dictionary<string, int>   vesselStagingMode    = new Dictionary<string, int>();
+    public readonly Dictionary<string, float> vesselHoldDuration   = new Dictionary<string, float>();
+    public readonly Dictionary<string, float> vesselDoubleTapDelay = new Dictionary<string, float>();
+
+    public StagingMode GetStagingMode(string vesselId)
+    {
+        if (vesselId != null && vesselStagingMode.TryGetValue(vesselId, out int m))
+            return (StagingMode)m;
+        return StagingMode.ModifierKey;
+    }
+    public void SetStagingMode(string vesselId, StagingMode mode)
+    {
+        if (vesselId != null) vesselStagingMode[vesselId] = (int)mode;
+    }
+
+    public float GetHoldDuration(string vesselId)
+    {
+        if (vesselId != null && vesselHoldDuration.TryGetValue(vesselId, out float v))
+            return v;
+        return 2.0f;
+    }
+    public void SetHoldDuration(string vesselId, float v)
+    {
+        if (vesselId != null) vesselHoldDuration[vesselId] = v;
+    }
+
+    public float GetDoubleTapDelay(string vesselId)
+    {
+        if (vesselId != null && vesselDoubleTapDelay.TryGetValue(vesselId, out float v))
+            return v;
+        return 0.5f;
+    }
+    public void SetDoubleTapDelay(string vesselId, float v)
+    {
+        if (vesselId != null) vesselDoubleTapDelay[vesselId] = v;
+    }
 
     public KeyCode GetModifierKey(string vesselId)
     {
@@ -150,6 +195,12 @@ public class StagingBlockerScenario : ScenarioModule
             node.AddValue(KEY_PREFIX + kv.Key, kv.Value);
         foreach (var kv in vesselStagingBlocked)
             node.AddValue(BLOCKED_PREFIX + kv.Key, kv.Value.ToString());
+        foreach (var kv in vesselStagingMode)
+            node.AddValue(MODE_PREFIX + kv.Key, kv.Value.ToString());
+        foreach (var kv in vesselHoldDuration)
+            node.AddValue(HOLD_PREFIX + kv.Key, kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var kv in vesselDoubleTapDelay)
+            node.AddValue(TAP_PREFIX + kv.Key, kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     public override void OnLoad(ConfigNode node)
@@ -160,6 +211,9 @@ public class StagingBlockerScenario : ScenarioModule
 
         vesselModifierKeys.Clear();
         vesselStagingBlocked.Clear();
+        vesselStagingMode.Clear();
+        vesselHoldDuration.Clear();
+        vesselDoubleTapDelay.Clear();
         foreach (ConfigNode.Value val in node.values)
         {
             if (val.name.StartsWith(KEY_PREFIX))
@@ -170,6 +224,23 @@ public class StagingBlockerScenario : ScenarioModule
             {
                 if (bool.TryParse(val.value, out bool b))
                     vesselStagingBlocked[val.name.Substring(BLOCKED_PREFIX.Length)] = b;
+            }
+            else if (val.name.StartsWith(MODE_PREFIX))
+            {
+                if (int.TryParse(val.value, out int m))
+                    vesselStagingMode[val.name.Substring(MODE_PREFIX.Length)] = m;
+            }
+            else if (val.name.StartsWith(HOLD_PREFIX))
+            {
+                if (float.TryParse(val.value, System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out float hv))
+                    vesselHoldDuration[val.name.Substring(HOLD_PREFIX.Length)] = hv;
+            }
+            else if (val.name.StartsWith(TAP_PREFIX))
+            {
+                if (float.TryParse(val.value, System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out float tv))
+                    vesselDoubleTapDelay[val.name.Substring(TAP_PREFIX.Length)] = tv;
             }
         }
         Debug.Log("[StagingBlocker] Scenario loaded — " + vesselModifierKeys.Count + " vessel key(s), "
@@ -227,7 +298,23 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Active vessel tracking (for per-vessel key load/save) ─────────────────
     private string _currentVesselId = null;
-    
+
+    // ── Staging mode ─────────────────────────────────────────────────────────
+    private StagingMode _stagingMode    = StagingMode.ModifierKey;
+    private float       _holdDuration   = 2.0f;
+    private float       _doubleTapDelay = 0.5f;
+
+    // ── Press-and-hold runtime state ─────────────────────────────────────────
+    private bool  _isHolding = false;
+    private float _holdTimer = 0f;
+
+    // ── Double-tap runtime state ──────────────────────────────────────────────
+    private float _lastTapTime = -999f;
+
+    // ── GUI text-field state ──────────────────────────────────────────────────
+    private string _holdDurationStr   = "2.0";
+    private string _doubleTapDelayStr = "0.5";
+
     // ── Cached reflection handles for StageManager ────────────────────────────
     private static MethodInfo _activateNextStageMethod = null;
     private static bool _stagingMethodSearched = false;
@@ -314,25 +401,36 @@ public class StagingBlockerFlight : MonoBehaviour
         var scen = StagingBlockerScenario.Instance;
         if (scen != null)
         {
-            modifierKey     = scen.GetModifierKey(_currentVesselId);
-            _stagingBlocked = scen.GetStagingBlocked(_currentVesselId);
+            modifierKey      = scen.GetModifierKey(_currentVesselId);
+            _stagingBlocked  = scen.GetStagingBlocked(_currentVesselId);
+            _stagingMode     = scen.GetStagingMode(_currentVesselId);
+            _holdDuration    = scen.GetHoldDuration(_currentVesselId);
+            _doubleTapDelay  = scen.GetDoubleTapDelay(_currentVesselId);
         }
         else
         {
-            modifierKey     = KeyCode.BackQuote;
-            _stagingBlocked = true;
+            modifierKey      = KeyCode.BackQuote;
+            _stagingBlocked  = true;
+            _stagingMode     = StagingMode.ModifierKey;
+            _holdDuration    = 2.0f;
+            _doubleTapDelay  = 0.5f;
         }
+        _holdDurationStr   = _holdDuration.ToString("F1");
+        _doubleTapDelayStr = _doubleTapDelay.ToString("F2");
         Debug.Log("[StagingBlocker] Loaded vessel \"" + v.vesselName
-                  + "\": key=" + modifierKey + ", blocked=" + _stagingBlocked);
+                  + "\": key=" + modifierKey + ", blocked=" + _stagingBlocked
+                  + ", mode=" + _stagingMode);
     }
 
     void ApplyStagingLock(bool block)
     {
         _stagingBlocked = block;
-        if (block)
+        bool shouldLock = _stagingMode != StagingMode.ModifierKey || _stagingBlocked;
+        if (shouldLock)
         {
             InputLockManager.SetControlLock(ControlTypes.STAGING, LOCK_ID);
-            Debug.Log("[StagingBlocker] Staging lock ON — SPACE requires modifier: " + modifierKey);
+            Debug.Log("[StagingBlocker] Staging lock ON (mode=" + _stagingMode
+                      + ", modifier: " + modifierKey + ")");
         }
         else
         {
@@ -340,6 +438,16 @@ public class StagingBlockerFlight : MonoBehaviour
             Debug.Log("[StagingBlocker] Staging lock OFF — SPACE acts normally");
         }
         SaveToScenario();
+    }
+
+    void OnStagingModeChanged(StagingMode newMode)
+    {
+        _stagingMode = newMode;
+        _isHolding   = false;
+        _holdTimer   = _holdDuration;
+        _lastTapTime = -999f;
+        isSettingKey = false;
+        ApplyStagingLock(_stagingBlocked);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -377,10 +485,53 @@ public class StagingBlockerFlight : MonoBehaviour
             return; // don't process staging while capturing
         }
 
-        // When blocking is active, allow staging only with modifier + SPACE
-        if (_stagingBlocked && Input.GetKey(modifierKey) && Input.GetKeyDown(KeyCode.Space))
+        // Mode-specific staging logic
+        switch (_stagingMode)
         {
-            TriggerNextStage();
+            case StagingMode.ModifierKey:
+                if (_stagingBlocked && Input.GetKey(modifierKey) && Input.GetKeyDown(KeyCode.Space))
+                    TriggerNextStage();
+                break;
+
+            case StagingMode.PressAndHold:
+                if (Input.GetKeyDown(KeyCode.Space))
+                {
+                    _isHolding = true;
+                    _holdTimer = _holdDuration;
+                }
+                else if (_isHolding && !Input.GetKey(KeyCode.Space))
+                {
+                    // released before threshold
+                    _isHolding = false;
+                    _holdTimer = _holdDuration;
+                }
+                if (_isHolding && Input.GetKey(KeyCode.Space))
+                {
+                    _holdTimer -= Time.deltaTime;
+                    if (_holdTimer <= 0f)
+                    {
+                        _isHolding = false;
+                        _holdTimer = 0f;
+                        TriggerNextStage();
+                    }
+                }
+                break;
+
+            case StagingMode.DoubleTap:
+                if (Input.GetKeyDown(KeyCode.Space))
+                {
+                    float now = Time.time;
+                    if (_lastTapTime > 0f && (now - _lastTapTime) <= _doubleTapDelay)
+                    {
+                        _lastTapTime = -999f;
+                        TriggerNextStage();
+                    }
+                    else
+                    {
+                        _lastTapTime = now;
+                    }
+                }
+                break;
         }
     }
 
@@ -646,40 +797,108 @@ public class StagingBlockerFlight : MonoBehaviour
 
         GUILayout.Space(8);
 
-        // ── Spacebar block toggle + modifier key ────────────────────────────
+        // ── Staging mode selector ────────────────────────────────────────────
+        string[] modeNames = { "Modifier Key", "Press & Hold", "Double-Tap" };
+        int modeIdx    = (int)_stagingMode;
+        int newModeIdx = GUILayout.Toolbar(modeIdx, modeNames);
+        if (newModeIdx != modeIdx)
+            OnStagingModeChanged((StagingMode)newModeIdx);
+
+        GUILayout.Space(4);
+
+        // ── Mode-specific settings ───────────────────────────────────────────
         GUILayout.BeginVertical("box");
 
-        // Toggle row
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Modifier Key Required:", GUILayout.Width(150));
-        string toggleLabel = _stagingBlocked ? "ENABLED" : "DISABLED";
-        Color prevColor = GUI.backgroundColor;
-        GUI.backgroundColor = _stagingBlocked ? new Color(0.7f, 0.1f, 0.1f) : new Color(0.1f, 0.55f, 0.1f);
-        if (GUILayout.Button(toggleLabel, GUILayout.Width(90)))
-            ApplyStagingLock(!_stagingBlocked);
-        GUI.backgroundColor = prevColor;
-        GUILayout.EndHorizontal();
-
-        if (_stagingBlocked)
+        switch (_stagingMode)
         {
-            GUILayout.Label(">>Hold Modifier Key + Press SPACE to STAGE<<", GUI.skin.label);
-            GUILayout.Space(2);
+            case StagingMode.ModifierKey:
+            {
+                // Toggle row
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Modifier Key Required:", GUILayout.Width(150));
+                string toggleLabel = _stagingBlocked ? "ENABLED" : "DISABLED";
+                Color prevColor = GUI.backgroundColor;
+                GUI.backgroundColor = _stagingBlocked ? new Color(0.7f, 0.1f, 0.1f) : new Color(0.1f, 0.55f, 0.1f);
+                if (GUILayout.Button(toggleLabel, GUILayout.Width(90)))
+                    ApplyStagingLock(!_stagingBlocked);
+                GUI.backgroundColor = prevColor;
+                GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Modifier Key:", GUILayout.Width(100));
-            if (isSettingKey)
-            {
-                GUILayout.Label("[ Press a key... ]", GUILayout.Width(130));
-                if (GUILayout.Button("Cancel", GUILayout.Width(60)))
-                    isSettingKey = false;
+                if (_stagingBlocked)
+                {
+                    GUILayout.Label(">>Hold Modifier Key + Press SPACE to STAGE<<", GUI.skin.label);
+                    GUILayout.Space(2);
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Modifier Key:", GUILayout.Width(100));
+                    if (isSettingKey)
+                    {
+                        GUILayout.Label("[ Press a key... ]", GUILayout.Width(130));
+                        if (GUILayout.Button("Cancel", GUILayout.Width(60)))
+                            isSettingKey = false;
+                    }
+                    else
+                    {
+                        GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(100));
+                        if (GUILayout.Button("Change", GUILayout.Width(70)))
+                            isSettingKey = true;
+                    }
+                    GUILayout.EndHorizontal();
+                }
+                break;
             }
-            else
+
+            case StagingMode.PressAndHold:
             {
-                GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(100));
-                if (GUILayout.Button("Change", GUILayout.Width(70)))
-                    isSettingKey = true;
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Hold Duration (s):", GUILayout.Width(140));
+                string newHoldStr = GUILayout.TextField(_holdDurationStr, GUILayout.Width(55));
+                if (newHoldStr != _holdDurationStr)
+                {
+                    _holdDurationStr = newHoldStr;
+                    if (float.TryParse(newHoldStr, System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float hv))
+                    {
+                        _holdDuration = Mathf.Clamp(hv, 1.0f, 30.0f);
+                        SaveToScenario();
+                    }
+                }
+                GUILayout.Label("(1–30)", GUILayout.Width(45));
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(2);
+                GUILayout.Label("Hold SPACE for " + _holdDuration.ToString("F1") + "s to activate stage.", GUI.skin.label);
+
+                if (_isHolding)
+                {
+                    GUILayout.Space(2);
+                    GUILayout.Label("Holding... " + _holdTimer.ToString("F1") + "s remaining", _labelCenterStyle);
+                }
+                break;
             }
-            GUILayout.EndHorizontal();
+
+            case StagingMode.DoubleTap:
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Max Tap Delay (s):", GUILayout.Width(140));
+                string newTapStr = GUILayout.TextField(_doubleTapDelayStr, GUILayout.Width(55));
+                if (newTapStr != _doubleTapDelayStr)
+                {
+                    _doubleTapDelayStr = newTapStr;
+                    if (float.TryParse(newTapStr, System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float tv))
+                    {
+                        _doubleTapDelay = Mathf.Clamp(tv, 0.1f, 2.0f);
+                        SaveToScenario();
+                    }
+                }
+                GUILayout.Label("(0.1–2)", GUILayout.Width(45));
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(2);
+                GUILayout.Label("Double-tap SPACE within " + _doubleTapDelay.ToString("F2") + "s to activate stage.", GUI.skin.label);
+                break;
+            }
         }
 
         GUILayout.EndVertical();
@@ -714,6 +933,9 @@ public class StagingBlockerFlight : MonoBehaviour
         scen.showWindow = showWindow;
         scen.SetModifierKey(_currentVesselId, modifierKey);
         scen.SetStagingBlocked(_currentVesselId, _stagingBlocked);
+        scen.SetStagingMode(_currentVesselId, _stagingMode);
+        scen.SetHoldDuration(_currentVesselId, _holdDuration);
+        scen.SetDoubleTapDelay(_currentVesselId, _doubleTapDelay);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
