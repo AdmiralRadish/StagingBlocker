@@ -287,6 +287,7 @@ public class StagingBlockerFlight : MonoBehaviour
 
         // Stock toolbar button
         GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
+        GameEvents.onGUIApplicationLauncherUnreadifying.Add(OnGUIAppLauncherUnreadifying);
         _retryButtonCoroutine = StartCoroutine(RetryAppLauncherButton());
     }
 
@@ -722,6 +723,12 @@ public class StagingBlockerFlight : MonoBehaviour
     {
         AddAppLauncherButton("onGUIApplicationLauncherReady");
     }
+
+    void OnGUIAppLauncherUnreadifying(GameScenes _)
+    {
+        // Mirror SCANsat's lifecycle pattern: remove before AppLauncher rebuild.
+        RemoveAppLauncherButton("onGUIApplicationLauncherUnreadifying");
+    }
     
     IEnumerator RetryAppLauncherButton()
     {
@@ -866,45 +873,50 @@ public class StagingBlockerFlight : MonoBehaviour
         SaveToScenario();
 
         GameEvents.onGUIApplicationLauncherReady.Remove(OnGUIAppLauncherReady);
+        GameEvents.onGUIApplicationLauncherUnreadifying.Remove(OnGUIAppLauncherUnreadifying);
         if (_retryButtonCoroutine != null)
         {
             StopCoroutine(_retryButtonCoroutine);
             _retryButtonCoroutine = null;
         }
 
-        // Remove stock AppLauncher button
-        if (_appButton != null)
-        {
-            bool removed = false;
-            try
-            {
-                Type alType = null;
-                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    alType = a.GetType("ApplicationLauncher")
-                          ?? a.GetType("KSP.UI.Screens.ApplicationLauncher");
-                    if (alType != null) break;
-                }
-                if (alType != null)
-                {
-                    var inst = alType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
-                                    ?.GetValue(null, null);
-                    var rem  = alType.GetMethod("RemoveModApplication", BindingFlags.Public | BindingFlags.Instance);
-                    if (rem != null && inst != null)
-                    {
-                        Debug.Log("[StagingBlocker] AppLauncher remove attempt starting.");
-                        rem.Invoke(inst, new object[] { _appButton });
-                        removed = true;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[StagingBlocker] AppLauncher remove failed: " + e.GetType().Name + ": " + e.Message);
-            }
+        RemoveAppLauncherButton("OnDestroy");
+    }
 
-            Debug.Log("[StagingBlocker] AppLauncher remove " + (removed ? "succeeded." : "could not run (instance/method missing)."));
-            _appButton = null;
+    void RemoveAppLauncherButton(string source)
+    {
+        if (_appButton == null)
+            return;
+
+        bool removed = false;
+        try
+        {
+            Type alType = null;
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                alType = a.GetType("ApplicationLauncher")
+                      ?? a.GetType("KSP.UI.Screens.ApplicationLauncher");
+                if (alType != null) break;
+            }
+            if (alType != null)
+            {
+                var inst = alType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
+                                ?.GetValue(null, null);
+                var rem = alType.GetMethod("RemoveModApplication", BindingFlags.Public | BindingFlags.Instance);
+                if (rem != null && inst != null)
+                {
+                    Debug.Log("[StagingBlocker] AppLauncher remove attempt starting (" + source + ").");
+                    rem.Invoke(inst, new object[] { _appButton });
+                    removed = true;
+                }
+            }
         }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[StagingBlocker] AppLauncher remove failed (" + source + "): " + e.GetType().Name + ": " + e.Message);
+        }
+
+        Debug.Log("[StagingBlocker] AppLauncher remove " + (removed ? "succeeded." : "could not run (instance/method missing).") + " (" + source + ")");
+        _appButton = null;
     }
 }
