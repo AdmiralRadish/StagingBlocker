@@ -47,10 +47,14 @@ When LunaMultiplayer is detected:
 - No additional configuration needed
 
 ## Configuration
-The mod stores all settings in the flight scenario file:
-- `showWindow`: Whether the staging manager is visible
+The mod stores gameplay settings in the flight scenario file:
 - Per-vessel modifier keys
 - Per-vessel staging block states
+- Per-vessel staging modes and timing values
+
+Local window preferences are stored separately in `GameData/StagingBlocker/PluginData/StagingBlocker.xml`:
+- `showWindow`: Whether the staging manager is visible
+- Window position and size
 
 Settings are loaded automatically on flight start and saved when changed.
 
