@@ -1,7 +1,10 @@
 using System;
 using System.Collections;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Xml;
 using UnityEngine;
 
 #pragma warning disable CS8618, CS8600, CS8601, CS8625
@@ -15,9 +18,8 @@ public enum StagingMode { ModifierKey = 0, PressAndHold = 1, DoubleTap = 2 }
 //  SBLunaHelper — optional detection of LunaMultiplayer (LMP)
 //
 //  Uses reflection so there is no hard dependency on LMP assemblies.
-//  The modifier hotkey is stored globally (no player prefix) in
-//  StagingBlockerScenario, so KSP/LMP scenario-sync automatically propagates
-//  the same key to every connected player — no additional work needed.
+//  Player identity is resolved at runtime so settings can be namespaced
+//  per-user where needed in scenario storage.
 // ─────────────────────────────────────────────────────────────────────────────
 public static class SBLunaHelper
 {
@@ -90,22 +92,20 @@ public static class SBLunaHelper
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  StagingBlockerScenario — persists window state and per-vessel settings
+//  StagingBlockerScenario — persists per-vessel gameplay settings
 //
-//  Both the modifier key and the staging-block toggle are stored per vessel ID
-//  (no player prefix) so that every player in a LunaMultiplayer session shares
-//  the same state for each vessel via KSP/LMP automatic scenario sync.
+//  Staging-block toggle is stored per user + per vessel.
+//  Modifier/mode/hold/delay are stored per user + per vessel so Luna players
+//  can have their own controls without overwriting each other.
 // ─────────────────────────────────────────────────────────────────────────────
 [KSPScenario(ScenarioCreationOptions.AddToAllGames, new GameScenes[] { GameScenes.FLIGHT })]
 public class StagingBlockerScenario : ScenarioModule
 {
     public static StagingBlockerScenario Instance;
 
-    public bool showWindow = true;
-
     // vessel ID (string) → KeyCode name (string)
     public readonly Dictionary<string, string> vesselModifierKeys   = new Dictionary<string, string>();
-    // vessel ID (string) → staging-block enabled (bool stored as string)
+    // user|vessel ID (string) → staging-block enabled (bool stored as string)
     public readonly Dictionary<string, bool>   vesselStagingBlocked = new Dictionary<string, bool>();
 
     private const KeyCode DEFAULT_KEY     = KeyCode.BackQuote; // tilde ~
@@ -119,66 +119,96 @@ public class StagingBlockerScenario : ScenarioModule
     public readonly Dictionary<string, float> vesselHoldDuration   = new Dictionary<string, float>();
     public readonly Dictionary<string, float> vesselDoubleTapDelay = new Dictionary<string, float>();
 
-    public StagingMode GetStagingMode(string vesselId)
+    string UserVesselKey(string vesselId, string userId)
     {
-        if (vesselId != null && vesselStagingMode.TryGetValue(vesselId, out int m))
+        if (string.IsNullOrEmpty(vesselId)) return string.Empty;
+        string safeUser = string.IsNullOrEmpty(userId) ? "SinglePlayer" : userId;
+        return safeUser + "|" + vesselId;
+    }
+
+    public StagingMode GetStagingMode(string vesselId, string userId)
+    {
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key) && vesselStagingMode.TryGetValue(key, out int m))
+            return (StagingMode)m;
+        if (vesselId != null && vesselStagingMode.TryGetValue(vesselId, out m)) // backward compatibility
             return (StagingMode)m;
         return StagingMode.ModifierKey;
     }
-    public void SetStagingMode(string vesselId, StagingMode mode)
+    public void SetStagingMode(string vesselId, string userId, StagingMode mode)
     {
-        if (vesselId != null) vesselStagingMode[vesselId] = (int)mode;
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key)) vesselStagingMode[key] = (int)mode;
     }
 
-    public float GetHoldDuration(string vesselId)
+    public float GetHoldDuration(string vesselId, string userId)
     {
-        if (vesselId != null && vesselHoldDuration.TryGetValue(vesselId, out float v))
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key) && vesselHoldDuration.TryGetValue(key, out float v))
             return v;
-        return 2.0f;
-    }
-    public void SetHoldDuration(string vesselId, float v)
-    {
-        if (vesselId != null) vesselHoldDuration[vesselId] = v;
-    }
-
-    public float GetDoubleTapDelay(string vesselId)
-    {
-        if (vesselId != null && vesselDoubleTapDelay.TryGetValue(vesselId, out float v))
+        if (vesselId != null && vesselHoldDuration.TryGetValue(vesselId, out v)) // backward compatibility
             return v;
-        return 0.5f;
+        return 5.0f;
     }
-    public void SetDoubleTapDelay(string vesselId, float v)
+    public void SetHoldDuration(string vesselId, string userId, float v)
     {
-        if (vesselId != null) vesselDoubleTapDelay[vesselId] = v;
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key)) vesselHoldDuration[key] = v;
     }
 
-    public KeyCode GetModifierKey(string vesselId)
+    public float GetDoubleTapDelay(string vesselId, string userId)
     {
-        if (vesselId != null && vesselModifierKeys.TryGetValue(vesselId, out string keyStr))
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key) && vesselDoubleTapDelay.TryGetValue(key, out float v))
+            return v;
+        if (vesselId != null && vesselDoubleTapDelay.TryGetValue(vesselId, out v)) // backward compatibility
+            return v;
+        return 0.3f;
+    }
+    public void SetDoubleTapDelay(string vesselId, string userId, float v)
+    {
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key)) vesselDoubleTapDelay[key] = v;
+    }
+
+    public KeyCode GetModifierKey(string vesselId, string userId)
+    {
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key) && vesselModifierKeys.TryGetValue(key, out string keyStr))
         {
             try { return (KeyCode)Enum.Parse(typeof(KeyCode), keyStr); }
+            catch { }
+        }
+        if (vesselId != null && vesselModifierKeys.TryGetValue(vesselId, out string oldKeyStr)) // backward compatibility
+        {
+            try { return (KeyCode)Enum.Parse(typeof(KeyCode), oldKeyStr); }
             catch { }
         }
         return DEFAULT_KEY;
     }
 
-    public void SetModifierKey(string vesselId, KeyCode key)
+    public void SetModifierKey(string vesselId, string userId, KeyCode key)
     {
-        if (vesselId != null)
-            vesselModifierKeys[vesselId] = key.ToString();
+        string k = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(k))
+            vesselModifierKeys[k] = key.ToString();
     }
 
-    public bool GetStagingBlocked(string vesselId)
+    public bool GetStagingBlocked(string vesselId, string userId)
     {
-        if (vesselId != null && vesselStagingBlocked.TryGetValue(vesselId, out bool blocked))
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key) && vesselStagingBlocked.TryGetValue(key, out bool blocked))
+            return blocked;
+        if (vesselId != null && vesselStagingBlocked.TryGetValue(vesselId, out blocked)) // backward compatibility
             return blocked;
         return true; // default: staging is blocked
     }
 
-    public void SetStagingBlocked(string vesselId, bool blocked)
+    public void SetStagingBlocked(string vesselId, string userId, bool blocked)
     {
-        if (vesselId != null)
-            vesselStagingBlocked[vesselId] = blocked;
+        string key = UserVesselKey(vesselId, userId);
+        if (!string.IsNullOrEmpty(key))
+            vesselStagingBlocked[key] = blocked;
     }
 
     public override void OnAwake()
@@ -190,7 +220,6 @@ public class StagingBlockerScenario : ScenarioModule
     public override void OnSave(ConfigNode node)
     {
         base.OnSave(node);
-        node.SetValue("showWindow", showWindow.ToString(), true);
         foreach (var kv in vesselModifierKeys)
             node.AddValue(KEY_PREFIX + kv.Key, kv.Value);
         foreach (var kv in vesselStagingBlocked)
@@ -206,9 +235,6 @@ public class StagingBlockerScenario : ScenarioModule
     public override void OnLoad(ConfigNode node)
     {
         base.OnLoad(node);
-        if (node.HasValue("showWindow"))
-            bool.TryParse(node.GetValue("showWindow"), out showWindow);
-
         vesselModifierKeys.Clear();
         vesselStagingBlocked.Clear();
         vesselStagingMode.Clear();
@@ -259,9 +285,15 @@ public class StagingBlockerScenario : ScenarioModule
 public class StagingBlockerFlight : MonoBehaviour
 {
     private static StagingBlockerFlight _activeInstance = null;
-
+    private const string USER_PREFS_FILE_NAME = "StagingBlocker.xml";
     // ── Window / UI state ─────────────────────────────────────────────────────
     private Rect windowRect = new Rect(20, 80, 310, 270);
+    private Rect _lastSavedWindowRect = new Rect(20, 80, 310, 270);
+    private bool _lastSavedShowWindow = true;
+    private bool _userPrefsLoaded = false;
+    private float _lastWindowSaveTime = -1f;
+    private const float WINDOW_SAVE_DEBOUNCE = 0.5f;
+    private string _cachedUserPrefsPath = null;
     private bool showWindow = true;
     private bool isSettingKey = false;
 
@@ -298,11 +330,12 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Active vessel tracking (for per-vessel key load/save) ─────────────────
     private string _currentVesselId = null;
+    private string _currentUserId = "SinglePlayer";
 
     // ── Staging mode ─────────────────────────────────────────────────────────
     private StagingMode _stagingMode    = StagingMode.ModifierKey;
-    private float       _holdDuration   = 2.0f;
-    private float       _doubleTapDelay = 0.5f;
+    private float       _holdDuration   = 5.0f;
+    private float       _doubleTapDelay = 0.3f;
 
     // ── Press-and-hold runtime state ─────────────────────────────────────────
     private bool  _isHolding = false;
@@ -310,10 +343,11 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Double-tap runtime state ──────────────────────────────────────────────
     private float _lastTapTime = -999f;
+    private float _lastTapDelay = -1f;
 
     // ── GUI text-field state ──────────────────────────────────────────────────
-    private string _holdDurationStr   = "2.0";
-    private string _doubleTapDelayStr = "0.5";
+    private string _holdDurationStr   = "5.0";
+    private string _doubleTapDelayStr = "0.3";
 
     // ── Cached reflection handles for StageManager ────────────────────────────
     private static MethodInfo _activateNextStageMethod = null;
@@ -349,28 +383,26 @@ public class StagingBlockerFlight : MonoBehaviour
         // Log multiplayer status
         if (SBLunaHelper.IsLunaEnabled)
         {
-            Debug.Log("[StagingBlocker] LunaMultiplayer detected — modifier key is shared across all " +
-                      "players via scenario storage (player: " + SBLunaHelper.GetCurrentPlayerName() + ")");
+            Debug.Log("[StagingBlocker] LunaMultiplayer detected — control settings are stored per user + per vessel (player: "
+                      + SBLunaHelper.GetCurrentPlayerName() + ")");
         }
         else
         {
             Debug.Log("[StagingBlocker] Single-player mode");
         }
 
-        // Load persisted settings — showWindow is global; modifier key and staging-block are per-vessel.
+        // Load local user preferences (per-machine, not scenario-synced).
+        LoadUserPrefs();
+
+        // Load persisted gameplay settings (scenario; per-vessel).
         // All LMP players share the same per-vessel state via KSP/LMP scenario sync.
-        var scen = StagingBlockerScenario.Instance;
-        if (scen != null)
-            showWindow = scen.showWindow;
 
         // Subscribe to vessel change so we reload the key whenever the active vessel switches
         GameEvents.onVesselChange.Add(OnVesselChange);
 
-        // Load per-vessel state for the vessel that is active right now
-        LoadVesselState(FlightGlobals.ActiveVessel);
-
-        // Apply (or skip) the staging lock based on the persisted toggle state
-        ApplyStagingLock(_stagingBlocked);
+        // Defer vessel-state load until the flight scene is fully ready.
+        // ScenarioModules finish OnLoad() before onFlightReady fires, so saved settings are available.
+        GameEvents.onFlightReady.Add(OnFlightReady);
 
         // Stock toolbar button
         GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
@@ -383,6 +415,7 @@ public class StagingBlockerFlight : MonoBehaviour
     {
         try
         {
+            SaveUserPrefs();                        // persist local UI state before addon churn during vessel switch
             SaveToScenario();                        // persist the outgoing vessel's state first
             LoadVesselState(v);                      // load the incoming vessel's state
             ApplyStagingLock(_stagingBlocked);       // apply the new vessel's block toggle
@@ -394,29 +427,40 @@ public class StagingBlockerFlight : MonoBehaviour
         }
     }
 
+    void OnFlightReady()
+    {
+        GameEvents.onFlightReady.Remove(OnFlightReady);
+        LoadVesselState(FlightGlobals.ActiveVessel);
+        ApplyStagingLock(_stagingBlocked);
+        Debug.Log("[StagingBlocker] Flight ready — initial vessel state loaded from scenario");
+    }
+
     void LoadVesselState(Vessel v)
     {
         if (v == null) return;
         _currentVesselId = v.id.ToString();
+        _currentUserId = SBLunaHelper.GetCurrentPlayerName();
         var scen = StagingBlockerScenario.Instance;
         if (scen != null)
         {
-            modifierKey      = scen.GetModifierKey(_currentVesselId);
-            _stagingBlocked  = scen.GetStagingBlocked(_currentVesselId);
-            _stagingMode     = scen.GetStagingMode(_currentVesselId);
-            _holdDuration    = scen.GetHoldDuration(_currentVesselId);
-            _doubleTapDelay  = scen.GetDoubleTapDelay(_currentVesselId);
+            modifierKey      = scen.GetModifierKey(_currentVesselId, _currentUserId);
+            _stagingBlocked  = scen.GetStagingBlocked(_currentVesselId, _currentUserId);
+            _stagingMode     = scen.GetStagingMode(_currentVesselId, _currentUserId);
+            _holdDuration    = scen.GetHoldDuration(_currentVesselId, _currentUserId);
+            _doubleTapDelay  = scen.GetDoubleTapDelay(_currentVesselId, _currentUserId);
         }
         else
         {
             modifierKey      = KeyCode.BackQuote;
             _stagingBlocked  = true;
             _stagingMode     = StagingMode.ModifierKey;
-            _holdDuration    = 2.0f;
-            _doubleTapDelay  = 0.5f;
+            _holdDuration    = 5.0f;
+            _doubleTapDelay  = 0.3f;
         }
         _holdDurationStr   = _holdDuration.ToString("F1");
         _doubleTapDelayStr = _doubleTapDelay.ToString("F2");
+        _lastTapTime = -999f;
+        _lastTapDelay = -1f;
         Debug.Log("[StagingBlocker] Loaded vessel \"" + v.vesselName
                   + "\": key=" + modifierKey + ", blocked=" + _stagingBlocked
                   + ", mode=" + _stagingMode);
@@ -446,6 +490,7 @@ public class StagingBlockerFlight : MonoBehaviour
         _isHolding   = false;
         _holdTimer   = _holdDuration;
         _lastTapTime = -999f;
+        _lastTapDelay = -1f;
         isSettingKey = false;
         ApplyStagingLock(_stagingBlocked);
     }
@@ -453,16 +498,6 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void Update()
     {
-        // Fallback hotkey to toggle window visibility (All 4 arrow keys)
-        // This is a safety net if the toolbar button fails to respond
-        if (Input.GetKeyDown(KeyCode.UpArrow) && Input.GetKey(KeyCode.DownArrow) 
-            && Input.GetKey(KeyCode.LeftArrow) && Input.GetKey(KeyCode.RightArrow))
-        {
-            SetWindowVisible(!showWindow);
-            Debug.Log("[StagingBlocker] Window toggled via fallback hotkey (All 4 arrow keys): " + showWindow);
-            return;
-        }
-
         // While waiting for key-bind input, capture next keypress
         if (isSettingKey)
         {
@@ -521,10 +556,20 @@ public class StagingBlockerFlight : MonoBehaviour
                 if (IsStageKeyDown())
                 {
                     float now = Time.time;
-                    if (_lastTapTime > 0f && (now - _lastTapTime) <= _doubleTapDelay)
+                    if (_lastTapTime > 0f)
                     {
-                        _lastTapTime = -999f;
-                        TriggerNextStage();
+                        float measuredDelay = now - _lastTapTime;
+                        _lastTapDelay = measuredDelay <= 5.0f ? measuredDelay : -1f;
+
+                        if (measuredDelay <= _doubleTapDelay)
+                        {
+                            _lastTapTime = -999f;
+                            TriggerNextStage();
+                        }
+                        else
+                        {
+                            _lastTapTime = now;
+                        }
                     }
                     else
                     {
@@ -591,6 +636,20 @@ public class StagingBlockerFlight : MonoBehaviour
             "STAGING MANAGER",
             GUILayout.Width(windowRect.width),
             GUILayout.Height(windowRect.height));
+
+        if (_userPrefsLoaded &&
+            (Mathf.Abs(windowRect.x - _lastSavedWindowRect.x) > 0.01f ||
+             Mathf.Abs(windowRect.y - _lastSavedWindowRect.y) > 0.01f ||
+             Mathf.Abs(windowRect.width - _lastSavedWindowRect.width) > 0.01f ||
+             Mathf.Abs(windowRect.height - _lastSavedWindowRect.height) > 0.01f))
+        {
+            float _now = Time.realtimeSinceStartup;
+            if (_now - _lastWindowSaveTime > WINDOW_SAVE_DEBOUNCE)
+            {
+                _lastWindowSaveTime = _now;
+                SaveUserPrefs();
+            }
+        }
     }
 
     void EnsureStyles()
@@ -728,42 +787,70 @@ public class StagingBlockerFlight : MonoBehaviour
     void SetWindowVisible(bool visible)
     {
         showWindow = visible;
+        if (_lastSavedShowWindow != showWindow)
+            SaveUserPrefs();
         SaveToScenario();
         if (_appButton != null)
         {
-            try
-            {
-                _appButton.GetType()
-                    .GetMethod(visible ? "SetTrue" : "SetFalse",
-                               BindingFlags.Public | BindingFlags.Instance)
-                    ?.Invoke(_appButton, null);
-            }
-            catch { }
+            TrySetAppButtonState(visible);
         }
+    }
+
+    void TrySetAppButtonState(bool visible)
+    {
+        try
+        {
+            string methodName = visible ? "SetTrue" : "SetFalse";
+            var appButtonType = _appButton.GetType();
+
+            // KSP versions differ: some expose SetTrue/SetFalse(), others SetTrue/SetFalse(bool).
+            var noArg = appButtonType.GetMethod(methodName,
+                BindingFlags.Public | BindingFlags.Instance,
+                null,
+                Type.EmptyTypes,
+                null);
+            if (noArg != null)
+            {
+                noArg.Invoke(_appButton, null);
+                return;
+            }
+
+            var boolArg = appButtonType.GetMethod(methodName,
+                BindingFlags.Public | BindingFlags.Instance,
+                null,
+                new[] { typeof(bool) },
+                null);
+            if (boolArg != null)
+            {
+                boolArg.Invoke(_appButton, new object[] { true });
+                return;
+            }
+
+            // Last-chance fallback for unexpected signatures.
+            appButtonType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance)
+                         ?.Invoke(_appButton, null);
+        }
+        catch { }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     void DrawWindow(int id)
     {
         string stageKeyName = GetStageKeyDisplayName();
+        bool showLastTapDelay = _stagingMode == StagingMode.DoubleTap
+            && _lastTapDelay > 0f
+            && _lastTapDelay <= 5.0f;
 
         // ── X (close) button — top-right of title bar ────────────────────────
-        const float CLOSE_W = 18f;
-        const float CLOSE_H = 16f;
+        const float CLOSE_W = 16f;
+        const float CLOSE_H = 14f;
         var prevBg = GUI.backgroundColor;
         GUI.backgroundColor = new Color(0.75f, 0.12f, 0.12f);
-        if (GUI.Button(new Rect(windowRect.width - CLOSE_W - 4f, 2f, CLOSE_W, CLOSE_H), "×"))
+        if (GUI.Button(new Rect(windowRect.width - CLOSE_W - 4f, 3f, CLOSE_W, CLOSE_H), "×"))
             SetWindowVisible(false);
         GUI.backgroundColor = prevBg;
 
         GUILayout.BeginVertical();
-
-        // ── Fallback hotkey info (small text) ──────────────────────────────
-        GUILayout.BeginHorizontal();
-        var smallLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 10 };
-        GUILayout.Label("(All 4 arrow keys to toggle window)", smallLabelStyle);
-        GUILayout.FlexibleSpace();
-        GUILayout.EndHorizontal();
 
         var vessel = FlightGlobals.ActiveVessel;
 
@@ -817,7 +904,7 @@ public class StagingBlockerFlight : MonoBehaviour
             {
                 // Toggle row
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("Modifier Key Required:", GUILayout.Width(150));
+                GUILayout.Label("Status:", GUILayout.Width(110));
                 string toggleLabel = _stagingBlocked ? "ENABLED" : "DISABLED";
                 Color prevColor = GUI.backgroundColor;
                 GUI.backgroundColor = _stagingBlocked ? new Color(0.7f, 0.1f, 0.1f) : new Color(0.1f, 0.55f, 0.1f);
@@ -828,24 +915,23 @@ public class StagingBlockerFlight : MonoBehaviour
 
                 if (_stagingBlocked)
                 {
-                    GUILayout.Label(">>Hold Modifier Key + Press " + stageKeyName + " to STAGE<<", GUI.skin.label);
-                    GUILayout.Space(2);
-
                     GUILayout.BeginHorizontal();
-                    GUILayout.Label("Modifier Key:", GUILayout.Width(100));
+                    GUILayout.Label("Modifier Key:", GUILayout.Width(110));
                     if (isSettingKey)
                     {
-                        GUILayout.Label("[ Press a key... ]", GUILayout.Width(130));
-                        if (GUILayout.Button("Cancel", GUILayout.Width(60)))
+                        GUILayout.Label("[ Press a key... ]", GUILayout.Width(120));
+                        if (GUILayout.Button("Cancel", GUILayout.Width(70)))
                             isSettingKey = false;
                     }
                     else
                     {
-                        GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(100));
+                        GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(90));
                         if (GUILayout.Button("Change", GUILayout.Width(70)))
                             isSettingKey = true;
                     }
                     GUILayout.EndHorizontal();
+                    GUILayout.Label("Hold " + ModifierKeyDisplayName(modifierKey) + " and tap " + stageKeyName + " to activate stage", GUI.skin.label);
+                    
                 }
                 break;
             }
@@ -853,7 +939,7 @@ public class StagingBlockerFlight : MonoBehaviour
             case StagingMode.PressAndHold:
             {
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("Hold Duration (s):", GUILayout.Width(140));
+                GUILayout.Label("Duration (s):", GUILayout.Width(110));
                 string newHoldStr = GUILayout.TextField(_holdDurationStr, GUILayout.Width(55));
                 if (newHoldStr != _holdDurationStr)
                 {
@@ -865,11 +951,11 @@ public class StagingBlockerFlight : MonoBehaviour
                         SaveToScenario();
                     }
                 }
-                GUILayout.Label("(1–30)", GUILayout.Width(45));
+                GUILayout.Label("(1-30)", GUILayout.Width(45));
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(2);
-                GUILayout.Label("Hold " + stageKeyName + " for " + _holdDuration.ToString("F1") + "s to activate stage.", GUI.skin.label);
+                GUILayout.Label("Hold " + stageKeyName + " for " + _holdDuration.ToString("F1") + "s to activate stage", GUI.skin.label);
 
                 if (_isHolding)
                 {
@@ -882,7 +968,7 @@ public class StagingBlockerFlight : MonoBehaviour
             case StagingMode.DoubleTap:
             {
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("Double-Tap Speed (s):", GUILayout.Width(140));
+                GUILayout.Label("Delay (s):", GUILayout.Width(110));
                 string newTapStr = GUILayout.TextField(_doubleTapDelayStr, GUILayout.Width(55));
                 if (newTapStr != _doubleTapDelayStr)
                 {
@@ -890,15 +976,17 @@ public class StagingBlockerFlight : MonoBehaviour
                     if (float.TryParse(newTapStr, System.Globalization.NumberStyles.Float,
                                        System.Globalization.CultureInfo.InvariantCulture, out float tv))
                     {
-                        _doubleTapDelay = Mathf.Clamp(tv, 0.1f, 2.0f);
+                        _doubleTapDelay = Mathf.Clamp(tv, 0.1f, 5.0f);
                         SaveToScenario();
                     }
                 }
-                GUILayout.Label("(0.1 – 2 sec)", GUILayout.Width(45));
+                GUILayout.Label("(0.1-5)", GUILayout.Width(45));
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(2);
-                GUILayout.Label("Double-tap " + stageKeyName + " within " + _doubleTapDelay.ToString("F2") + "s to activate stage.", GUI.skin.label);
+                GUILayout.Label("Double-tap " + stageKeyName + " within " + _doubleTapDelay.ToString("F2") + "s to activate stage", GUI.skin.label);
+                GUILayout.Label(showLastTapDelay ? ("Last Delay: " + _lastTapDelay.ToString("F1") + "s") : " ",
+                    GUI.skin.label, GUILayout.Height(20f));
                 break;
             }
         }
@@ -973,12 +1061,241 @@ public class StagingBlockerFlight : MonoBehaviour
     {
         var scen = StagingBlockerScenario.Instance;
         if (scen == null) return;
-        scen.showWindow = showWindow;
-        scen.SetModifierKey(_currentVesselId, modifierKey);
-        scen.SetStagingBlocked(_currentVesselId, _stagingBlocked);
-        scen.SetStagingMode(_currentVesselId, _stagingMode);
-        scen.SetHoldDuration(_currentVesselId, _holdDuration);
-        scen.SetDoubleTapDelay(_currentVesselId, _doubleTapDelay);
+        scen.SetModifierKey(_currentVesselId, _currentUserId, modifierKey);
+        scen.SetStagingBlocked(_currentVesselId, _currentUserId, _stagingBlocked);
+        scen.SetStagingMode(_currentVesselId, _currentUserId, _stagingMode);
+        scen.SetHoldDuration(_currentVesselId, _currentUserId, _holdDuration);
+        scen.SetDoubleTapDelay(_currentVesselId, _currentUserId, _doubleTapDelay);
+    }
+
+    void LoadUserPrefs()
+    {
+        try
+        {
+            string prefsPath = GetUserPrefsPath();
+            Debug.Log("[StagingBlocker] LoadUserPrefs: path=\"" + prefsPath + "\", exists=" + File.Exists(prefsPath));
+
+            if (!File.Exists(prefsPath))
+            {
+                Debug.Log("[StagingBlocker] LoadUserPrefs: no file — attempting legacy migration");
+                if (TryLoadLegacyUserPrefs())
+                    SaveUserPrefs();
+                return;
+            }
+
+            var doc = new XmlDocument();
+            doc.Load(prefsPath);
+
+            XmlElement root = doc.DocumentElement;
+            if (root == null)
+            {
+                Debug.LogWarning("[StagingBlocker] LoadUserPrefs: XML has no root element");
+                return;
+            }
+
+            showWindow = ParseBool(GetFirstChildInnerText(root, "ShowWindow", "showWindow"), showWindow);
+
+            XmlElement window = GetFirstChildElement(root, "Window", "window");
+            float x;
+            float y;
+            float w;
+            float h;
+            if (window != null)
+            {
+                x = ParseFloat(GetFirstNonEmpty(
+                    window.GetAttribute("x"),
+                    window.GetAttribute("X"),
+                    GetFirstChildInnerText(window, "x", "X")),
+                    windowRect.x);
+
+                y = ParseFloat(GetFirstNonEmpty(
+                    window.GetAttribute("y"),
+                    window.GetAttribute("Y"),
+                    GetFirstChildInnerText(window, "y", "Y")),
+                    windowRect.y);
+
+                w = ParseFloat(GetFirstNonEmpty(
+                    window.GetAttribute("width"),
+                    window.GetAttribute("Width"),
+                    GetFirstChildInnerText(window, "width", "Width", "w", "W")),
+                    windowRect.width);
+
+                h = ParseFloat(GetFirstNonEmpty(
+                    window.GetAttribute("height"),
+                    window.GetAttribute("Height"),
+                    GetFirstChildInnerText(window, "height", "Height", "h", "H")),
+                    windowRect.height);
+            }
+            else
+            {
+                x = ParseFloat(GetFirstChildInnerText(root, "windowX", "WindowX", "x", "X"), windowRect.x);
+                y = ParseFloat(GetFirstChildInnerText(root, "windowY", "WindowY", "y", "Y"), windowRect.y);
+                w = ParseFloat(GetFirstChildInnerText(root, "windowW", "WindowW", "width", "Width"), windowRect.width);
+                h = ParseFloat(GetFirstChildInnerText(root, "windowH", "WindowH", "height", "Height"), windowRect.height);
+            }
+
+            windowRect = new Rect(x, y, Mathf.Max(MIN_WIDTH, w), Mathf.Max(MIN_HEIGHT, h));
+            _lastSavedWindowRect = windowRect;
+            _lastSavedShowWindow = showWindow;
+            Debug.Log("[StagingBlocker] LoadUserPrefs: rect=" + windowRect + " showWindow=" + showWindow);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[StagingBlocker] Failed to load user prefs: " + e.Message);
+            _lastSavedWindowRect = windowRect;
+            _lastSavedShowWindow = showWindow;
+        }
+        finally
+        {
+            _userPrefsLoaded = true;
+        }
+    }
+
+    void SaveUserPrefs()
+    {
+        try
+        {
+            string prefsPath = GetUserPrefsPath();
+            string prefsDir = Path.GetDirectoryName(prefsPath);
+            if (!string.IsNullOrEmpty(prefsDir))
+                Directory.CreateDirectory(prefsDir);
+
+            var doc = new XmlDocument();
+            XmlElement root = doc.CreateElement("StagingBlockerUserPrefs");
+            doc.AppendChild(root);
+
+            XmlElement showWindowNode = doc.CreateElement("ShowWindow");
+            showWindowNode.InnerText = showWindow.ToString();
+            root.AppendChild(showWindowNode);
+
+            XmlElement windowNode = doc.CreateElement("Window");
+            windowNode.SetAttribute("x", windowRect.x.ToString(CultureInfo.InvariantCulture));
+            windowNode.SetAttribute("y", windowRect.y.ToString(CultureInfo.InvariantCulture));
+            windowNode.SetAttribute("width", windowRect.width.ToString(CultureInfo.InvariantCulture));
+            windowNode.SetAttribute("height", windowRect.height.ToString(CultureInfo.InvariantCulture));
+            root.AppendChild(windowNode);
+
+            doc.Save(prefsPath);
+            Debug.Log("[StagingBlocker] SaveUserPrefs: rect=" + windowRect + " → \"" + prefsPath + "\"");
+
+            _lastSavedWindowRect = windowRect;
+            _lastSavedShowWindow = showWindow;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[StagingBlocker] Failed to save user prefs: " + e.Message);
+        }
+    }
+
+    string GetUserPrefsPath()
+    {
+        if (_cachedUserPrefsPath != null)
+            return _cachedUserPrefsPath;
+
+        try
+        {
+            string root = KSPUtil.ApplicationRootPath;
+            if (!string.IsNullOrEmpty(root))
+            {
+                _cachedUserPrefsPath = Path.Combine(
+                    root.TrimEnd('/', '\\'),
+                    "GameData", "StagingBlocker", "PluginData", USER_PREFS_FILE_NAME);
+                return _cachedUserPrefsPath;
+            }
+        }
+        catch { }
+
+        string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        if (!string.IsNullOrEmpty(assemblyDir))
+        {
+            var pluginDir = new DirectoryInfo(assemblyDir);
+            DirectoryInfo modDir = pluginDir.Parent;
+            if (modDir != null)
+            {
+                _cachedUserPrefsPath = Path.Combine(modDir.FullName, "PluginData", USER_PREFS_FILE_NAME);
+                return _cachedUserPrefsPath;
+            }
+
+            _cachedUserPrefsPath = Path.Combine(assemblyDir, USER_PREFS_FILE_NAME);
+            return _cachedUserPrefsPath;
+        }
+
+        _cachedUserPrefsPath = USER_PREFS_FILE_NAME;
+        return _cachedUserPrefsPath;
+    }
+
+    bool TryLoadLegacyUserPrefs()
+    {
+        try
+        {
+            var prefs = KSP.IO.PluginConfiguration.CreateForType<StagingBlockerFlight>();
+            prefs.load();
+
+            showWindow = prefs.GetValue<bool>("showWindow", showWindow);
+
+            float x = prefs.GetValue<float>("windowX", windowRect.x);
+            float y = prefs.GetValue<float>("windowY", windowRect.y);
+            float w = prefs.GetValue<float>("windowW", windowRect.width);
+            float h = prefs.GetValue<float>("windowH", windowRect.height);
+
+            windowRect = new Rect(x, y, Mathf.Max(MIN_WIDTH, w), Mathf.Max(MIN_HEIGHT, h));
+            _lastSavedWindowRect = windowRect;
+            _lastSavedShowWindow = showWindow;
+            return true;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[StagingBlocker] Legacy user prefs migration failed: " + e.Message);
+            return false;
+        }
+    }
+
+    static float ParseFloat(string? value, float fallback)
+    {
+        float parsed;
+        if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+            return parsed;
+        return fallback;
+    }
+
+    static string GetFirstNonEmpty(params string[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrEmpty(value))
+                return value;
+        }
+        return string.Empty;
+    }
+
+    static XmlElement? GetFirstChildElement(XmlElement parent, params string[] names)
+    {
+        foreach (XmlNode node in parent.ChildNodes)
+        {
+            var element = node as XmlElement;
+            if (element == null) continue;
+
+            foreach (var name in names)
+            {
+                if (string.Equals(element.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return element;
+            }
+        }
+        return null;
+    }
+
+    static string GetFirstChildInnerText(XmlElement parent, params string[] names)
+    {
+        var child = GetFirstChildElement(parent, names);
+        return child != null ? child.InnerText : string.Empty;
+    }
+
+    static bool ParseBool(string? value, bool fallback)
+    {
+        bool parsed;
+        if (bool.TryParse(value, out parsed))
+            return parsed;
+        return fallback;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1092,8 +1409,7 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             if (!showWindow)  // Only log/save if actually changing state
             {
-                showWindow = true;
-                SaveToScenario();
+                SetWindowVisible(true);
                 Debug.Log("[StagingBlocker] Window opened via toolbar");
             }
         }
@@ -1110,8 +1426,7 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             if (showWindow)  // Only log/save if actually changing state
             {
-                showWindow = false;
-                SaveToScenario();
+                SetWindowVisible(false);
                 Debug.Log("[StagingBlocker] Window closed via toolbar");
             }
         }
@@ -1127,7 +1442,9 @@ public class StagingBlockerFlight : MonoBehaviour
     // ─────────────────────────────────────────────────────────────────────────
     void OnDestroy()
     {
-        if (_activeInstance == this)
+        bool isActiveInstance = _activeInstance == this;
+
+        if (isActiveInstance)
             _activeInstance = null;
 
         // Always remove the staging lock when leaving flight
@@ -1135,7 +1452,17 @@ public class StagingBlockerFlight : MonoBehaviour
         Debug.Log("[StagingBlocker] Staging lock removed");
 
         GameEvents.onVesselChange.Remove(OnVesselChange);
-        SaveToScenario();
+        GameEvents.onFlightReady.Remove(OnFlightReady);
+
+        if (!isActiveInstance)
+        {
+            Debug.Log("[StagingBlocker] Skipping persistence for duplicate destroyed flight addon instance.");
+        }
+        else
+        {
+            SaveUserPrefs();
+            SaveToScenario();
+        }
 
         GameEvents.onGUIApplicationLauncherReady.Remove(OnGUIAppLauncherReady);
         GameEvents.onGUIApplicationLauncherUnreadifying.Remove(OnGUIAppLauncherUnreadifying);
