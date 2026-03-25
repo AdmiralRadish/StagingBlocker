@@ -5,6 +5,7 @@
 *.userprefs
 *.userosscache
 *.zip
+*_*.md
 
 # Build outputs
 bin/
