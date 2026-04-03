@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
@@ -36,7 +37,7 @@ public static class LunaMultiplayerHelper
             foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
             {
                 string name = a.GetName().Name;
-                if (name.Contains("LunaMultiplayer") || name == "LMP.Client")
+                if (name == "LmpClient" || name.Contains("LunaMultiplayer") || name == "LMP.Client")
                     return true;
             }
         }
@@ -52,15 +53,40 @@ public static class LunaMultiplayerHelper
         {
             if (IsLunaEnabled)
             {
-                // Probe common LMP type/property paths without a hard reference
-                string[] typeNames =
+                // Probe LMP type/property paths without a hard reference.
+                // Current LmpClient: SettingsSystem.CurrentSettings.PlayerName
+                string[] settingsTypeNames =
+                {
+                    "LmpClient.Systems.SettingsSys.SettingsSystem"
+                };
+                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    foreach (var typeName in settingsTypeNames)
+                    {
+                        var t = a.GetType(typeName);
+                        if (t == null) continue;
+                        var currentSettings = t.GetProperty("CurrentSettings",
+                            BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                        if (currentSettings == null) continue;
+                        var playerName = currentSettings.GetType()
+                            .GetProperty("PlayerName")?.GetValue(currentSettings) as string;
+                        if (!string.IsNullOrEmpty(playerName))
+                        {
+                            _cachedPlayerName = playerName;
+                            return playerName;
+                        }
+                    }
+                }
+
+                // Legacy probe paths (older LMP builds)
+                string[] legacyTypeNames =
                 {
                     "LunaClient.Systems.PlayerConnection.PlayerConnectionSystem",
                     "LMP.Client.Systems.PlayerConnection.PlayerConnectionSystem"
                 };
                 foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    foreach (var typeName in typeNames)
+                    foreach (var typeName in legacyTypeNames)
                     {
                         var t = a.GetType(typeName);
                         if (t == null) continue;
@@ -94,6 +120,12 @@ public static class LunaMultiplayerHelper
 [KSPScenario(ScenarioCreationOptions.AddToAllGames, new GameScenes[] { GameScenes.FLIGHT })]
 public class StagingBlockerScenario : ScenarioModule
 {
+    public enum StagingTriggerMode
+    {
+        HoldToStage,
+        DoubleTap
+    }
+
     public static StagingBlockerScenario Instance;
 
     public bool showWindow = true;
@@ -102,16 +134,46 @@ public class StagingBlockerScenario : ScenarioModule
     public readonly Dictionary<string, string> vesselModifierKeys   = new Dictionary<string, string>();
     // vessel ID (string) → staging-block enabled (bool stored as string)
     public readonly Dictionary<string, bool>   vesselStagingBlocked = new Dictionary<string, bool>();
+    // vessel ID (string) → trigger mode
+    public readonly Dictionary<string, string> vesselTriggerModes   = new Dictionary<string, string>();
+    // vessel ID (string) → hold seconds
+    public readonly Dictionary<string, float>  vesselHoldSeconds    = new Dictionary<string, float>();
+    // vessel ID (string) → double-tap window seconds
+    public readonly Dictionary<string, float>  vesselDoubleTapSeconds = new Dictionary<string, float>();
 
     private const KeyCode DEFAULT_KEY     = KeyCode.BackQuote; // tilde ~
+    private const StagingTriggerMode DEFAULT_MODE = StagingTriggerMode.HoldToStage;
+    private const float DEFAULT_HOLD_SECONDS = 5.00f;
+    private const float DEFAULT_DOUBLE_TAP_SECONDS = 0.20f;
     private const string  KEY_PREFIX      = "vesselKey_";
     private const string  BLOCKED_PREFIX  = "vesselBlocked_";
+    private const string  MODE_PREFIX     = "vesselMode_";
+    private const string  HOLD_PREFIX     = "vesselHoldSec_";
+    private const string  DOUBLE_TAP_PREFIX = "vesselDoubleTapSec_";
+
+    // ── User-configurable defaults (applied to new/unconfigured vessels) ─────
+    private const string  DEFAULT_KEY_NODE     = "defaultKey";
+    private const string  DEFAULT_BLOCKED_NODE = "defaultBlocked";
+    private const string  DEFAULT_MODE_NODE    = "defaultMode";
+    private const string  DEFAULT_HOLD_NODE    = "defaultHoldSec";
+    private const string  DEFAULT_DOUBLE_TAP_NODE = "defaultDoubleTapSec";
+    private string _userDefaultKey     = null;   // null = use hardcoded DEFAULT_KEY
+    private bool?  _userDefaultBlocked = null;   // null = use hardcoded true
+    private StagingTriggerMode? _userDefaultMode = null;
+    private float? _userDefaultHoldSeconds = null;
+    private float? _userDefaultDoubleTapSeconds = null;
 
     public KeyCode GetModifierKey(string vesselId)
     {
         if (vesselId != null && vesselModifierKeys.TryGetValue(vesselId, out string keyStr))
         {
             try { return (KeyCode)Enum.Parse(typeof(KeyCode), keyStr); }
+            catch { }
+        }
+        // Fall back to user default, then hardcoded default
+        if (_userDefaultKey != null)
+        {
+            try { return (KeyCode)Enum.Parse(typeof(KeyCode), _userDefaultKey); }
             catch { }
         }
         return DEFAULT_KEY;
@@ -127,7 +189,8 @@ public class StagingBlockerScenario : ScenarioModule
     {
         if (vesselId != null && vesselStagingBlocked.TryGetValue(vesselId, out bool blocked))
             return blocked;
-        return true; // default: staging is blocked
+        // Fall back to user default, then hardcoded default
+        return _userDefaultBlocked ?? true;
     }
 
     public void SetStagingBlocked(string vesselId, bool blocked)
@@ -135,6 +198,74 @@ public class StagingBlockerScenario : ScenarioModule
         if (vesselId != null)
             vesselStagingBlocked[vesselId] = blocked;
     }
+
+    public StagingTriggerMode GetTriggerMode(string vesselId)
+    {
+        if (vesselId != null && vesselTriggerModes.TryGetValue(vesselId, out string modeStr))
+        {
+            if (Enum.TryParse(modeStr, out StagingTriggerMode mode))
+                return mode;
+        }
+        return _userDefaultMode ?? DEFAULT_MODE;
+    }
+
+    public void SetTriggerMode(string vesselId, StagingTriggerMode mode)
+    {
+        if (vesselId != null)
+            vesselTriggerModes[vesselId] = mode.ToString();
+    }
+
+    public float GetHoldSeconds(string vesselId)
+    {
+        if (vesselId != null && vesselHoldSeconds.TryGetValue(vesselId, out float hold))
+            return Mathf.Clamp(hold, 0.05f, 10.0f);
+        return Mathf.Clamp(_userDefaultHoldSeconds ?? DEFAULT_HOLD_SECONDS, 0.05f, 10.0f);
+    }
+
+    public void SetHoldSeconds(string vesselId, float holdSeconds)
+    {
+        if (vesselId != null)
+            vesselHoldSeconds[vesselId] = Mathf.Clamp(holdSeconds, 0.05f, 10.0f);
+    }
+
+    public float GetDoubleTapSeconds(string vesselId)
+    {
+        if (vesselId != null && vesselDoubleTapSeconds.TryGetValue(vesselId, out float dt))
+            return Mathf.Clamp(dt, 0.10f, 1.0f);
+        return Mathf.Clamp(_userDefaultDoubleTapSeconds ?? DEFAULT_DOUBLE_TAP_SECONDS, 0.10f, 1.0f);
+    }
+
+    public void SetDoubleTapSeconds(string vesselId, float doubleTapSeconds)
+    {
+        if (vesselId != null)
+            vesselDoubleTapSeconds[vesselId] = Mathf.Clamp(doubleTapSeconds, 0.10f, 1.0f);
+    }
+
+    /// <summary>Save current vessel behavior as defaults for unconfigured vessels.</summary>
+    public void SetDefaults(KeyCode key, bool blocked, StagingTriggerMode mode, float holdSeconds, float doubleTapSeconds)
+    {
+        _userDefaultKey     = key.ToString();
+        _userDefaultBlocked = blocked;
+        _userDefaultMode = mode;
+        _userDefaultHoldSeconds = Mathf.Clamp(holdSeconds, 0.05f, 10.0f);
+        _userDefaultDoubleTapSeconds = Mathf.Clamp(doubleTapSeconds, 0.10f, 1.0f);
+    }
+
+    /// <summary>True when user-configured defaults differ from the hardcoded fallback.</summary>
+    public bool HasUserDefaults => _userDefaultKey != null
+        || _userDefaultBlocked != null
+        || _userDefaultMode != null
+        || _userDefaultHoldSeconds != null
+        || _userDefaultDoubleTapSeconds != null;
+
+    public KeyCode DefaultKey => _userDefaultKey != null
+        ? (KeyCode)Enum.Parse(typeof(KeyCode), _userDefaultKey)
+        : DEFAULT_KEY;
+
+    public bool DefaultBlocked => _userDefaultBlocked ?? true;
+    public StagingTriggerMode DefaultMode => _userDefaultMode ?? DEFAULT_MODE;
+    public float DefaultHoldSeconds => Mathf.Clamp(_userDefaultHoldSeconds ?? DEFAULT_HOLD_SECONDS, 0.05f, 10.0f);
+    public float DefaultDoubleTapSeconds => Mathf.Clamp(_userDefaultDoubleTapSeconds ?? DEFAULT_DOUBLE_TAP_SECONDS, 0.10f, 1.0f);
 
     public override void OnAwake()
     {
@@ -146,10 +277,26 @@ public class StagingBlockerScenario : ScenarioModule
     {
         base.OnSave(node);
         node.SetValue("showWindow", showWindow.ToString(), true);
+        if (_userDefaultKey != null)
+            node.SetValue(DEFAULT_KEY_NODE, _userDefaultKey, true);
+        if (_userDefaultBlocked != null)
+            node.SetValue(DEFAULT_BLOCKED_NODE, _userDefaultBlocked.Value.ToString(), true);
+        if (_userDefaultMode != null)
+            node.SetValue(DEFAULT_MODE_NODE, _userDefaultMode.Value.ToString(), true);
+        if (_userDefaultHoldSeconds != null)
+            node.SetValue(DEFAULT_HOLD_NODE, _userDefaultHoldSeconds.Value.ToString(CultureInfo.InvariantCulture), true);
+        if (_userDefaultDoubleTapSeconds != null)
+            node.SetValue(DEFAULT_DOUBLE_TAP_NODE, _userDefaultDoubleTapSeconds.Value.ToString(CultureInfo.InvariantCulture), true);
         foreach (var kv in vesselModifierKeys)
             node.AddValue(KEY_PREFIX + kv.Key, kv.Value);
         foreach (var kv in vesselStagingBlocked)
             node.AddValue(BLOCKED_PREFIX + kv.Key, kv.Value.ToString());
+        foreach (var kv in vesselTriggerModes)
+            node.AddValue(MODE_PREFIX + kv.Key, kv.Value);
+        foreach (var kv in vesselHoldSeconds)
+            node.AddValue(HOLD_PREFIX + kv.Key, kv.Value.ToString(CultureInfo.InvariantCulture));
+        foreach (var kv in vesselDoubleTapSeconds)
+            node.AddValue(DOUBLE_TAP_PREFIX + kv.Key, kv.Value.ToString(CultureInfo.InvariantCulture));
     }
 
     public override void OnLoad(ConfigNode node)
@@ -158,8 +305,35 @@ public class StagingBlockerScenario : ScenarioModule
         if (node.HasValue("showWindow"))
             bool.TryParse(node.GetValue("showWindow"), out showWindow);
 
+        // Load user-configurable defaults
+        if (node.HasValue(DEFAULT_KEY_NODE))
+            _userDefaultKey = node.GetValue(DEFAULT_KEY_NODE);
+        if (node.HasValue(DEFAULT_BLOCKED_NODE))
+        {
+            if (bool.TryParse(node.GetValue(DEFAULT_BLOCKED_NODE), out bool b))
+                _userDefaultBlocked = b;
+        }
+        if (node.HasValue(DEFAULT_MODE_NODE))
+        {
+            if (Enum.TryParse(node.GetValue(DEFAULT_MODE_NODE), out StagingTriggerMode mode))
+                _userDefaultMode = mode;
+        }
+        if (node.HasValue(DEFAULT_HOLD_NODE))
+        {
+            if (float.TryParse(node.GetValue(DEFAULT_HOLD_NODE), NumberStyles.Float, CultureInfo.InvariantCulture, out float hold))
+                _userDefaultHoldSeconds = hold;
+        }
+        if (node.HasValue(DEFAULT_DOUBLE_TAP_NODE))
+        {
+            if (float.TryParse(node.GetValue(DEFAULT_DOUBLE_TAP_NODE), NumberStyles.Float, CultureInfo.InvariantCulture, out float dt))
+                _userDefaultDoubleTapSeconds = dt;
+        }
+
         vesselModifierKeys.Clear();
         vesselStagingBlocked.Clear();
+        vesselTriggerModes.Clear();
+        vesselHoldSeconds.Clear();
+        vesselDoubleTapSeconds.Clear();
         foreach (ConfigNode.Value val in node.values)
         {
             if (val.name.StartsWith(KEY_PREFIX))
@@ -171,9 +345,31 @@ public class StagingBlockerScenario : ScenarioModule
                 if (bool.TryParse(val.value, out bool b))
                     vesselStagingBlocked[val.name.Substring(BLOCKED_PREFIX.Length)] = b;
             }
+            else if (val.name.StartsWith(MODE_PREFIX))
+            {
+                vesselTriggerModes[val.name.Substring(MODE_PREFIX.Length)] = val.value;
+            }
+            else if (val.name.StartsWith(HOLD_PREFIX))
+            {
+                if (float.TryParse(val.value, NumberStyles.Float, CultureInfo.InvariantCulture, out float hold))
+                    vesselHoldSeconds[val.name.Substring(HOLD_PREFIX.Length)] = hold;
+            }
+            else if (val.name.StartsWith(DOUBLE_TAP_PREFIX))
+            {
+                if (float.TryParse(val.value, NumberStyles.Float, CultureInfo.InvariantCulture, out float dt))
+                    vesselDoubleTapSeconds[val.name.Substring(DOUBLE_TAP_PREFIX.Length)] = dt;
+            }
         }
         Debug.Log("[StagingBlocker] Scenario loaded — " + vesselModifierKeys.Count + " vessel key(s), "
-                  + vesselStagingBlocked.Count + " blocked state(s)");
+                  + vesselStagingBlocked.Count + " blocked state(s), "
+                  + vesselTriggerModes.Count + " mode(s)"
+                  + (HasUserDefaults
+                      ? ", user defaults: key=" + DefaultKey
+                        + " blocked=" + DefaultBlocked
+                        + " mode=" + DefaultMode
+                        + " hold=" + DefaultHoldSeconds.ToString("F2", CultureInfo.InvariantCulture)
+                        + " doubleTap=" + DefaultDoubleTapSeconds.ToString("F2", CultureInfo.InvariantCulture)
+                      : ""));
     }
 }
 
@@ -206,6 +402,12 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Modifier key (held while pressing SPACE to allow staging) ─────────────
     private KeyCode modifierKey = KeyCode.BackQuote; // default: ~ (tilde)
+    private StagingBlockerScenario.StagingTriggerMode _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+    private float _holdToStageSeconds = 5.00f;
+    private float _doubleTapWindowSeconds = 0.20f;
+    private float _holdStartRealtime = -1f;
+    private bool _holdTriggeredThisPress = false;
+    private float _lastSpaceTapRealtime = -10f;
 
     // ── GUI styles (created once after GUI system initialises) ────────────────
     private GUIStyle _redButtonStyle;
@@ -363,14 +565,24 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             modifierKey     = scen.GetModifierKey(_currentVesselId);
             _stagingBlocked = scen.GetStagingBlocked(_currentVesselId);
+            _triggerMode = scen.GetTriggerMode(_currentVesselId);
+            _holdToStageSeconds = scen.GetHoldSeconds(_currentVesselId);
+            _doubleTapWindowSeconds = scen.GetDoubleTapSeconds(_currentVesselId);
         }
         else
         {
             modifierKey     = KeyCode.BackQuote;
             _stagingBlocked = true;
+            _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+            _holdToStageSeconds = 5.00f;
+            _doubleTapWindowSeconds = 0.20f;
         }
         Debug.Log("[StagingBlocker] Loaded vessel \"" + v.vesselName
-                  + "\": key=" + modifierKey + ", blocked=" + _stagingBlocked);
+                  + "\": key=" + modifierKey
+                  + ", blocked=" + _stagingBlocked
+                  + ", mode=" + _triggerMode
+                  + ", hold=" + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture)
+                  + ", doubleTap=" + _doubleTapWindowSeconds.ToString("F2", CultureInfo.InvariantCulture));
     }
 
     void ApplyStagingLock(bool block)
@@ -424,11 +636,9 @@ public class StagingBlockerFlight : MonoBehaviour
             return; // don't process staging while capturing
         }
 
-        // When blocking is active, allow staging only with modifier + SPACE
-        if (_stagingBlocked && Input.GetKey(modifierKey) && Input.GetKeyDown(KeyCode.Space))
-        {
-            TriggerNextStage();
-        }
+        // Staging handling while block is active
+        if (_stagingBlocked)
+            HandleBlockedStagingInput();
 
         // Monitor toolbar button health periodically
         _lastToolbarStatusCheck += Time.deltaTime;
@@ -436,6 +646,53 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             _lastToolbarStatusCheck = 0f;
             MonitorToolbarHealth();
+        }
+    }
+
+    void HandleBlockedStagingInput()
+    {
+        if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
+        {
+            bool comboHeld = Input.GetKey(modifierKey) && Input.GetKey(KeyCode.Space);
+            if (comboHeld)
+            {
+                if (_holdStartRealtime < 0f)
+                {
+                    _holdStartRealtime = Time.realtimeSinceStartup;
+                    _holdTriggeredThisPress = false;
+                }
+
+                if (!_holdTriggeredThisPress
+                    && Time.realtimeSinceStartup - _holdStartRealtime >= _holdToStageSeconds)
+                {
+                    TriggerNextStage();
+                    _holdTriggeredThisPress = true;
+                }
+            }
+            else
+            {
+                _holdStartRealtime = -1f;
+                _holdTriggeredThisPress = false;
+            }
+
+            return;
+        }
+
+        if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap)
+        {
+            if (!Input.GetKeyDown(KeyCode.Space))
+                return;
+
+            float now = Time.realtimeSinceStartup;
+            if (now - _lastSpaceTapRealtime <= _doubleTapWindowSeconds)
+            {
+                TriggerNextStage();
+                _lastSpaceTapRealtime = -10f;
+            }
+            else
+            {
+                _lastSpaceTapRealtime = now;
+            }
         }
     }
 
@@ -696,6 +953,27 @@ public class StagingBlockerFlight : MonoBehaviour
         var smallLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 10 };
         GUILayout.Label("(All 4 arrow keys to toggle window)", smallLabelStyle);
         GUILayout.FlexibleSpace();
+        var scenTop = StagingBlockerScenario.Instance;
+        bool isCurrentDefault = scenTop != null
+            && modifierKey == scenTop.DefaultKey
+            && _stagingBlocked == scenTop.DefaultBlocked
+            && _triggerMode == scenTop.DefaultMode
+            && Mathf.Abs(_holdToStageSeconds - scenTop.DefaultHoldSeconds) < 0.001f
+            && Mathf.Abs(_doubleTapWindowSeconds - scenTop.DefaultDoubleTapSeconds) < 0.001f;
+        GUI.enabled = !isCurrentDefault;
+        if (GUILayout.Button("Set as Default", GUILayout.Width(105)))
+        {
+            if (scenTop != null)
+            {
+                scenTop.SetDefaults(modifierKey, _stagingBlocked, _triggerMode, _holdToStageSeconds, _doubleTapWindowSeconds);
+                Debug.Log("[StagingBlocker] Defaults updated: key=" + modifierKey
+                    + ", blocked=" + _stagingBlocked
+                    + ", mode=" + _triggerMode
+                    + ", hold=" + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture)
+                    + ", doubleTap=" + _doubleTapWindowSeconds.ToString("F2", CultureInfo.InvariantCulture));
+            }
+        }
+        GUI.enabled = true;
         GUILayout.EndHorizontal();
 
         var vessel = FlightGlobals.ActiveVessel;
@@ -735,6 +1013,18 @@ public class StagingBlockerFlight : MonoBehaviour
         // ── Spacebar block toggle + modifier key ────────────────────────────
         GUILayout.BeginVertical("box");
 
+        // Tab row
+        GUILayout.BeginHorizontal();
+        bool holdSelected = _triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+        bool doubleTapSelected = _triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap;
+        if (GUILayout.Toggle(holdSelected, "Hold To Stage", "Button"))
+            _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+        if (GUILayout.Toggle(doubleTapSelected, "Double Tap", "Button"))
+            _triggerMode = StagingBlockerScenario.StagingTriggerMode.DoubleTap;
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(3);
+
         // Toggle row
         GUILayout.BeginHorizontal();
         GUILayout.Label("Modifier Key Required:", GUILayout.Width(150));
@@ -748,24 +1038,44 @@ public class StagingBlockerFlight : MonoBehaviour
 
         if (_stagingBlocked)
         {
-            GUILayout.Label(">>Hold Modifier Key + Press SPACE to STAGE<<", GUI.skin.label);
-            GUILayout.Space(2);
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Modifier Key:", GUILayout.Width(100));
-            if (isSettingKey)
+            if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
             {
-                GUILayout.Label("[ Press a key... ]", GUILayout.Width(130));
-                if (GUILayout.Button("Cancel", GUILayout.Width(60)))
-                    isSettingKey = false;
+                GUILayout.Label(">>Hold Modifier Key + SPACE to STAGE<<", GUI.skin.label);
+                GUILayout.Space(2);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Modifier Key:", GUILayout.Width(100));
+                if (isSettingKey)
+                {
+                    GUILayout.Label("[ Press a key... ]", GUILayout.Width(130));
+                    if (GUILayout.Button("Cancel", GUILayout.Width(60)))
+                        isSettingKey = false;
+                }
+                else
+                {
+                    GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(100));
+                    if (GUILayout.Button("Change", GUILayout.Width(70)))
+                        isSettingKey = true;
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Hold Time:", GUILayout.Width(100));
+                _holdToStageSeconds = GUILayout.HorizontalSlider(_holdToStageSeconds, 0.05f, 10.0f, GUILayout.Width(120));
+                GUILayout.Label(_holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s", GUILayout.Width(60));
+                GUILayout.EndHorizontal();
             }
             else
             {
-                GUILayout.Label(ModifierKeyDisplayName(modifierKey), GUILayout.Width(100));
-                if (GUILayout.Button("Change", GUILayout.Width(70)))
-                    isSettingKey = true;
+                GUILayout.Label(">>Double tap SPACE to STAGE<<", GUI.skin.label);
+                GUILayout.Space(2);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Tap Window:", GUILayout.Width(100));
+                _doubleTapWindowSeconds = GUILayout.HorizontalSlider(_doubleTapWindowSeconds, 0.10f, 1.0f, GUILayout.Width(120));
+                GUILayout.Label(_doubleTapWindowSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s", GUILayout.Width(60));
+                GUILayout.EndHorizontal();
             }
-            GUILayout.EndHorizontal();
         }
 
         GUILayout.EndVertical();
@@ -800,6 +1110,9 @@ public class StagingBlockerFlight : MonoBehaviour
         scen.showWindow = showWindow;
         scen.SetModifierKey(_currentVesselId, modifierKey);
         scen.SetStagingBlocked(_currentVesselId, _stagingBlocked);
+        scen.SetTriggerMode(_currentVesselId, _triggerMode);
+        scen.SetHoldSeconds(_currentVesselId, _holdToStageSeconds);
+        scen.SetDoubleTapSeconds(_currentVesselId, _doubleTapWindowSeconds);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
