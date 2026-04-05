@@ -122,8 +122,9 @@ public class StagingBlockerScenario : ScenarioModule
 {
     public enum StagingTriggerMode
     {
-        HoldToStage,
-        DoubleTap
+        ModifierKey,   // hold modifier + space → instant stage
+        HoldToStage,   // hold space alone for N seconds → stage
+        DoubleTap      // double-tap space → stage
     }
 
     public static StagingBlockerScenario Instance;
@@ -142,7 +143,7 @@ public class StagingBlockerScenario : ScenarioModule
     public readonly Dictionary<string, float>  vesselDoubleTapSeconds = new Dictionary<string, float>();
 
     private const KeyCode DEFAULT_KEY     = KeyCode.BackQuote; // tilde ~
-    private const StagingTriggerMode DEFAULT_MODE = StagingTriggerMode.HoldToStage;
+    private const StagingTriggerMode DEFAULT_MODE = StagingTriggerMode.ModifierKey;
     private const float DEFAULT_HOLD_SECONDS = 5.00f;
     private const float DEFAULT_DOUBLE_TAP_SECONDS = 0.20f;
     private const string  KEY_PREFIX      = "vesselKey_";
@@ -478,12 +479,17 @@ public class StagingBlockerFlight : MonoBehaviour
         // Apply (or skip) the staging lock based on the persisted toggle state
         ApplyStagingLock(_stagingBlocked);
 
-        // Stock toolbar button
-        GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
-        StartCoroutine(RetryAppLauncherButton());
-
-        // ToolbarController button (optional mod)
+        // ToolbarController button (optional mod) — must run first so we know if TC is managing the button
         TryCreateToolbarControllerButton();
+
+        // Stock AppLauncher button — only register when ToolbarController is NOT present.
+        // When TC is installed it internally calls AddModApplication for us; a second call
+        // creates a duplicate/conflicting button and can prevent the icon from appearing.
+        if (!_tcCreated)
+        {
+            GameEvents.onGUIApplicationLauncherReady.Add(OnGUIAppLauncherReady);
+            StartCoroutine(RetryAppLauncherButton());
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -651,10 +657,19 @@ public class StagingBlockerFlight : MonoBehaviour
 
     void HandleBlockedStagingInput()
     {
+        // ModifierKey: press modifier + space → stage immediately (no hold timer)
+        if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey)
+        {
+            if (Input.GetKeyDown(KeyCode.Space) && Input.GetKey(modifierKey))
+                TriggerNextStage();
+            return;
+        }
+
+        // HoldToStage: hold space alone for N seconds (no modifier key needed)
         if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
         {
-            bool comboHeld = Input.GetKey(modifierKey) && Input.GetKey(KeyCode.Space);
-            if (comboHeld)
+            bool spaceHeld = Input.GetKey(KeyCode.Space);
+            if (spaceHeld)
             {
                 if (_holdStartRealtime < 0f)
                 {
@@ -678,6 +693,7 @@ public class StagingBlockerFlight : MonoBehaviour
             return;
         }
 
+        // DoubleTap: double-tap space (no modifier key needed)
         if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap)
         {
             if (!Input.GetKeyDown(KeyCode.Space))
@@ -1013,10 +1029,13 @@ public class StagingBlockerFlight : MonoBehaviour
         // ── Spacebar block toggle + modifier key ────────────────────────────
         GUILayout.BeginVertical("box");
 
-        // Tab row
+        // Tab row — three independent staging methods
         GUILayout.BeginHorizontal();
-        bool holdSelected = _triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+        bool modKeySelected    = _triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey;
+        bool holdSelected      = _triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage;
         bool doubleTapSelected = _triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap;
+        if (GUILayout.Toggle(modKeySelected, "Modifier Key", "Button"))
+            _triggerMode = StagingBlockerScenario.StagingTriggerMode.ModifierKey;
         if (GUILayout.Toggle(holdSelected, "Hold To Stage", "Button"))
             _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
         if (GUILayout.Toggle(doubleTapSelected, "Double Tap", "Button"))
@@ -1025,9 +1044,9 @@ public class StagingBlockerFlight : MonoBehaviour
 
         GUILayout.Space(3);
 
-        // Toggle row
+        // Block staging master toggle
         GUILayout.BeginHorizontal();
-        GUILayout.Label("Modifier Key Required:", GUILayout.Width(150));
+        GUILayout.Label("Block Staging:", GUILayout.Width(100));
         string toggleLabel = _stagingBlocked ? "ENABLED" : "DISABLED";
         Color prevColor = GUI.backgroundColor;
         GUI.backgroundColor = _stagingBlocked ? new Color(0.7f, 0.1f, 0.1f) : new Color(0.1f, 0.55f, 0.1f);
@@ -1038,9 +1057,9 @@ public class StagingBlockerFlight : MonoBehaviour
 
         if (_stagingBlocked)
         {
-            if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
+            if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey)
             {
-                GUILayout.Label(">>Hold Modifier Key + SPACE to STAGE<<", GUI.skin.label);
+                GUILayout.Label(">> Hold Modifier + SPACE to stage <<", GUI.skin.label);
                 GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
@@ -1058,6 +1077,11 @@ public class StagingBlockerFlight : MonoBehaviour
                         isSettingKey = true;
                 }
                 GUILayout.EndHorizontal();
+            }
+            else if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
+            {
+                GUILayout.Label(">> Hold SPACE for " + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s to stage <<", GUI.skin.label);
+                GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("Hold Time:", GUILayout.Width(100));
@@ -1067,7 +1091,7 @@ public class StagingBlockerFlight : MonoBehaviour
             }
             else
             {
-                GUILayout.Label(">>Double tap SPACE to STAGE<<", GUI.skin.label);
+                GUILayout.Label(">> Double tap SPACE to stage <<", GUI.skin.label);
                 GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
