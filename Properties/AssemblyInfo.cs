@@ -5,3 +5,5 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyDescription("KSP mod: blocks accidental staging and removes Warp Here button")]
 [assembly: AssemblyCopyright("MIT")]
 [assembly: ComVisible(false)]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
