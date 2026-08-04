@@ -1,4 +1,13 @@
 # Changelog
+## [1.2.0] - 2026-07-22
+
+### Added
+- External XML defaults file for the first-run staging blocker settings
+
+### Changed
+- Default blocked staging, default blocked throttle, and the initial tab now come from `GameData/StagingBlocker/StagingBlockerDefaults.xml`
+- Bumped mod version to 1.2.0
+
 ## [1.0.0] - 2026-03-08
 
 ### Added

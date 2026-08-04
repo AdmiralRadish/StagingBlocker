@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  StagingBlocker default settings.
+
+  This file controls the first-run values used when a vessel or scenario does
+  not yet have an explicit saved preference. The mod falls back to safe
+  compiled defaults if this file is missing or malformed.
+
+  Valid values:
+  - blockStagingEnabled: true or false
+  - blockThrottleEnabled: true or false
+  - firstTab: ModifierKey, HoldToStage, or DoubleTap
+-->
+<StagingBlockerDefaults>
+  <!-- New or unconfigured vessels start with staging blocked. -->
+  <blockStagingEnabled>true</blockStagingEnabled>
+
+  <!-- New or unconfigured vessels start with throttle blocked. -->
+  <blockThrottleEnabled>true</blockThrottleEnabled>
+
+  <!-- The GUI opens on the first tab. This is the default staging mode. -->
+  <firstTab>ModifierKey</firstTab>
+</StagingBlockerDefaults>

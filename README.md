@@ -54,6 +54,8 @@ The mod stores all settings in the flight scenario file:
 - Per-vessel modifier keys
 - Per-vessel staging block states
 
+The first-run defaults for blocking staging, blocking throttle, and the initial tab come from `GameData/StagingBlocker/StagingBlockerDefaults.xml`. If that file is missing or invalid, the mod falls back to safe compiled defaults.
+
 Settings are loaded automatically on flight start and saved when changed.
 
 ## Development

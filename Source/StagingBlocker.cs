@@ -1,8 +1,10 @@
 using System;
 using System.Collections;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Xml;
 using UnityEngine;
 
 #pragma warning disable CS8618, CS8600, CS8601, CS8625
@@ -111,6 +113,99 @@ public static class LunaMultiplayerHelper
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  StagingBlockerDefaultsXml — shipped XML file that controls the first-run
+//  fallback values when no scenario-specific defaults have been saved yet.
+//
+//  The file lives in GameData/StagingBlocker/StagingBlockerDefaults.xml so it
+//  ships with the mod folder and can be edited without rebuilding the DLL.
+// ─────────────────────────────────────────────────────────────────────────────
+internal static class StagingBlockerDefaultsXml
+{
+    private const string CONFIG_FILE_NAME = "StagingBlockerDefaults.xml";
+
+    private static bool _loaded;
+    private static bool _blockStagingEnabled = true;
+    private static bool _blockThrottleEnabled = true;
+    private static StagingBlockerScenario.StagingTriggerMode _firstTab = StagingBlockerScenario.StagingTriggerMode.ModifierKey;
+
+    internal static bool BlockStagingEnabled
+    {
+        get { EnsureLoaded(); return _blockStagingEnabled; }
+    }
+
+    internal static bool BlockThrottleEnabled
+    {
+        get { EnsureLoaded(); return _blockThrottleEnabled; }
+    }
+
+    internal static StagingBlockerScenario.StagingTriggerMode FirstTab
+    {
+        get { EnsureLoaded(); return _firstTab; }
+    }
+
+    private static void EnsureLoaded()
+    {
+        if (_loaded)
+            return;
+
+        _loaded = true;
+
+        string configPath = Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "StagingBlocker", CONFIG_FILE_NAME);
+        if (!File.Exists(configPath))
+        {
+            Debug.Log("[StagingBlocker] XML defaults not found at " + configPath + "; using compiled fallback values.");
+            return;
+        }
+
+        try
+        {
+            XmlDocument doc = new XmlDocument();
+            doc.Load(configPath);
+            XmlElement root = doc.DocumentElement;
+            if (root == null)
+                return;
+
+            TryLoadBool(root, "blockStagingEnabled", ref _blockStagingEnabled);
+            TryLoadBool(root, "blockThrottleEnabled", ref _blockThrottleEnabled);
+            TryLoadMode(root, "firstTab", ref _firstTab);
+
+            Debug.Log("[StagingBlocker] XML defaults loaded from " + configPath
+                + ": blockStagingEnabled=" + _blockStagingEnabled
+                + ", blockThrottleEnabled=" + _blockThrottleEnabled
+                + ", firstTab=" + _firstTab);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("[StagingBlocker] Failed to load XML defaults from " + configPath + ": " + ex.Message);
+        }
+    }
+
+    private static void TryLoadBool(XmlElement root, string elementName, ref bool value)
+    {
+        XmlNode element = root.SelectSingleNode(elementName);
+        if (element == null)
+            return;
+
+        if (bool.TryParse(element.InnerText.Trim(), out bool parsed))
+            value = parsed;
+        else
+            Debug.LogWarning("[StagingBlocker] Invalid boolean value for <" + elementName + "> in XML defaults: " + element.InnerText);
+    }
+
+    private static void TryLoadMode(XmlElement root, string elementName, ref StagingBlockerScenario.StagingTriggerMode value)
+    {
+        XmlNode element = root.SelectSingleNode(elementName);
+        if (element == null)
+            return;
+
+        if (Enum.TryParse(element.InnerText.Trim(), true, out StagingBlockerScenario.StagingTriggerMode parsed))
+            value = parsed;
+        else
+            Debug.LogWarning("[StagingBlocker] Invalid mode value for <" + elementName + "> in XML defaults: " + element.InnerText);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  StagingBlockerScenario — persists window state and per-vessel settings
 //
 //  Both the modifier key and the staging-block toggle are stored per vessel ID
@@ -135,6 +230,8 @@ public class StagingBlockerScenario : ScenarioModule
     public readonly Dictionary<string, string> vesselModifierKeys   = new Dictionary<string, string>();
     // vessel ID (string) → staging-block enabled (bool stored as string)
     public readonly Dictionary<string, bool>   vesselStagingBlocked = new Dictionary<string, bool>();
+    // vessel ID (string) → throttle-block enabled
+    public readonly Dictionary<string, bool>   vesselThrottleBlocked = new Dictionary<string, bool>();
     // vessel ID (string) → trigger mode
     public readonly Dictionary<string, string> vesselTriggerModes   = new Dictionary<string, string>();
     // vessel ID (string) → hold seconds
@@ -143,11 +240,11 @@ public class StagingBlockerScenario : ScenarioModule
     public readonly Dictionary<string, float>  vesselDoubleTapSeconds = new Dictionary<string, float>();
 
     private const KeyCode DEFAULT_KEY     = KeyCode.BackQuote; // tilde ~
-    private const StagingTriggerMode DEFAULT_MODE = StagingTriggerMode.ModifierKey;
     private const float DEFAULT_HOLD_SECONDS = 5.00f;
     private const float DEFAULT_DOUBLE_TAP_SECONDS = 0.20f;
     private const string  KEY_PREFIX      = "vesselKey_";
     private const string  BLOCKED_PREFIX  = "vesselBlocked_";
+    private const string  THROTTLE_BLOCKED_PREFIX = "vesselThrottleBlocked_";
     private const string  MODE_PREFIX     = "vesselMode_";
     private const string  HOLD_PREFIX     = "vesselHoldSec_";
     private const string  DOUBLE_TAP_PREFIX = "vesselDoubleTapSec_";
@@ -155,11 +252,13 @@ public class StagingBlockerScenario : ScenarioModule
     // ── User-configurable defaults (applied to new/unconfigured vessels) ─────
     private const string  DEFAULT_KEY_NODE     = "defaultKey";
     private const string  DEFAULT_BLOCKED_NODE = "defaultBlocked";
+    private const string  DEFAULT_THROTTLE_BLOCKED_NODE = "defaultThrottleBlocked";
     private const string  DEFAULT_MODE_NODE    = "defaultMode";
     private const string  DEFAULT_HOLD_NODE    = "defaultHoldSec";
     private const string  DEFAULT_DOUBLE_TAP_NODE = "defaultDoubleTapSec";
     private string _userDefaultKey     = null;   // null = use hardcoded DEFAULT_KEY
     private bool?  _userDefaultBlocked = null;   // null = use hardcoded true
+    private bool?  _userDefaultThrottleBlocked = null; // null = use hardcoded true
     private StagingTriggerMode? _userDefaultMode = null;
     private float? _userDefaultHoldSeconds = null;
     private float? _userDefaultDoubleTapSeconds = null;
@@ -191,13 +290,26 @@ public class StagingBlockerScenario : ScenarioModule
         if (vesselId != null && vesselStagingBlocked.TryGetValue(vesselId, out bool blocked))
             return blocked;
         // Fall back to user default, then hardcoded default
-        return _userDefaultBlocked ?? true;
+        return _userDefaultBlocked ?? StagingBlockerDefaultsXml.BlockStagingEnabled;
     }
 
     public void SetStagingBlocked(string vesselId, bool blocked)
     {
         if (vesselId != null)
             vesselStagingBlocked[vesselId] = blocked;
+    }
+
+    public bool GetThrottleBlocked(string vesselId)
+    {
+        if (vesselId != null && vesselThrottleBlocked.TryGetValue(vesselId, out bool blocked))
+            return blocked;
+        return _userDefaultThrottleBlocked ?? StagingBlockerDefaultsXml.BlockThrottleEnabled;
+    }
+
+    public void SetThrottleBlocked(string vesselId, bool blocked)
+    {
+        if (vesselId != null)
+            vesselThrottleBlocked[vesselId] = blocked;
     }
 
     public StagingTriggerMode GetTriggerMode(string vesselId)
@@ -207,7 +319,7 @@ public class StagingBlockerScenario : ScenarioModule
             if (Enum.TryParse(modeStr, out StagingTriggerMode mode))
                 return mode;
         }
-        return _userDefaultMode ?? DEFAULT_MODE;
+        return _userDefaultMode ?? StagingBlockerDefaultsXml.FirstTab;
     }
 
     public void SetTriggerMode(string vesselId, StagingTriggerMode mode)
@@ -243,10 +355,11 @@ public class StagingBlockerScenario : ScenarioModule
     }
 
     /// <summary>Save current vessel behavior as defaults for unconfigured vessels.</summary>
-    public void SetDefaults(KeyCode key, bool blocked, StagingTriggerMode mode, float holdSeconds, float doubleTapSeconds)
+    public void SetDefaults(KeyCode key, bool blocked, bool throttleBlocked, StagingTriggerMode mode, float holdSeconds, float doubleTapSeconds)
     {
         _userDefaultKey     = key.ToString();
         _userDefaultBlocked = blocked;
+        _userDefaultThrottleBlocked = throttleBlocked;
         _userDefaultMode = mode;
         _userDefaultHoldSeconds = Mathf.Clamp(holdSeconds, 0.05f, 10.0f);
         _userDefaultDoubleTapSeconds = Mathf.Clamp(doubleTapSeconds, 0.10f, 1.0f);
@@ -255,6 +368,7 @@ public class StagingBlockerScenario : ScenarioModule
     /// <summary>True when user-configured defaults differ from the hardcoded fallback.</summary>
     public bool HasUserDefaults => _userDefaultKey != null
         || _userDefaultBlocked != null
+        || _userDefaultThrottleBlocked != null
         || _userDefaultMode != null
         || _userDefaultHoldSeconds != null
         || _userDefaultDoubleTapSeconds != null;
@@ -263,8 +377,9 @@ public class StagingBlockerScenario : ScenarioModule
         ? (KeyCode)Enum.Parse(typeof(KeyCode), _userDefaultKey)
         : DEFAULT_KEY;
 
-    public bool DefaultBlocked => _userDefaultBlocked ?? true;
-    public StagingTriggerMode DefaultMode => _userDefaultMode ?? DEFAULT_MODE;
+    public bool DefaultBlocked => _userDefaultBlocked ?? StagingBlockerDefaultsXml.BlockStagingEnabled;
+    public bool DefaultThrottleBlocked => _userDefaultThrottleBlocked ?? StagingBlockerDefaultsXml.BlockThrottleEnabled;
+    public StagingTriggerMode DefaultMode => _userDefaultMode ?? StagingBlockerDefaultsXml.FirstTab;
     public float DefaultHoldSeconds => Mathf.Clamp(_userDefaultHoldSeconds ?? DEFAULT_HOLD_SECONDS, 0.05f, 10.0f);
     public float DefaultDoubleTapSeconds => Mathf.Clamp(_userDefaultDoubleTapSeconds ?? DEFAULT_DOUBLE_TAP_SECONDS, 0.10f, 1.0f);
 
@@ -282,6 +397,8 @@ public class StagingBlockerScenario : ScenarioModule
             node.SetValue(DEFAULT_KEY_NODE, _userDefaultKey, true);
         if (_userDefaultBlocked != null)
             node.SetValue(DEFAULT_BLOCKED_NODE, _userDefaultBlocked.Value.ToString(), true);
+        if (_userDefaultThrottleBlocked != null)
+            node.SetValue(DEFAULT_THROTTLE_BLOCKED_NODE, _userDefaultThrottleBlocked.Value.ToString(), true);
         if (_userDefaultMode != null)
             node.SetValue(DEFAULT_MODE_NODE, _userDefaultMode.Value.ToString(), true);
         if (_userDefaultHoldSeconds != null)
@@ -292,6 +409,8 @@ public class StagingBlockerScenario : ScenarioModule
             node.AddValue(KEY_PREFIX + kv.Key, kv.Value);
         foreach (var kv in vesselStagingBlocked)
             node.AddValue(BLOCKED_PREFIX + kv.Key, kv.Value.ToString());
+        foreach (var kv in vesselThrottleBlocked)
+            node.AddValue(THROTTLE_BLOCKED_PREFIX + kv.Key, kv.Value.ToString());
         foreach (var kv in vesselTriggerModes)
             node.AddValue(MODE_PREFIX + kv.Key, kv.Value);
         foreach (var kv in vesselHoldSeconds)
@@ -314,6 +433,11 @@ public class StagingBlockerScenario : ScenarioModule
             if (bool.TryParse(node.GetValue(DEFAULT_BLOCKED_NODE), out bool b))
                 _userDefaultBlocked = b;
         }
+        if (node.HasValue(DEFAULT_THROTTLE_BLOCKED_NODE))
+        {
+            if (bool.TryParse(node.GetValue(DEFAULT_THROTTLE_BLOCKED_NODE), out bool b))
+                _userDefaultThrottleBlocked = b;
+        }
         if (node.HasValue(DEFAULT_MODE_NODE))
         {
             if (Enum.TryParse(node.GetValue(DEFAULT_MODE_NODE), out StagingTriggerMode mode))
@@ -332,6 +456,7 @@ public class StagingBlockerScenario : ScenarioModule
 
         vesselModifierKeys.Clear();
         vesselStagingBlocked.Clear();
+        vesselThrottleBlocked.Clear();
         vesselTriggerModes.Clear();
         vesselHoldSeconds.Clear();
         vesselDoubleTapSeconds.Clear();
@@ -345,6 +470,11 @@ public class StagingBlockerScenario : ScenarioModule
             {
                 if (bool.TryParse(val.value, out bool b))
                     vesselStagingBlocked[val.name.Substring(BLOCKED_PREFIX.Length)] = b;
+            }
+            else if (val.name.StartsWith(THROTTLE_BLOCKED_PREFIX))
+            {
+                if (bool.TryParse(val.value, out bool b))
+                    vesselThrottleBlocked[val.name.Substring(THROTTLE_BLOCKED_PREFIX.Length)] = b;
             }
             else if (val.name.StartsWith(MODE_PREFIX))
             {
@@ -363,10 +493,12 @@ public class StagingBlockerScenario : ScenarioModule
         }
         Debug.Log("[StagingBlocker] Scenario loaded — " + vesselModifierKeys.Count + " vessel key(s), "
                   + vesselStagingBlocked.Count + " blocked state(s), "
+                                    + vesselThrottleBlocked.Count + " throttle blocked state(s), "
                   + vesselTriggerModes.Count + " mode(s)"
                   + (HasUserDefaults
                       ? ", user defaults: key=" + DefaultKey
                         + " blocked=" + DefaultBlocked
+                                                + " throttleBlocked=" + DefaultThrottleBlocked
                         + " mode=" + DefaultMode
                         + " hold=" + DefaultHoldSeconds.ToString("F2", CultureInfo.InvariantCulture)
                         + " doubleTap=" + DefaultDoubleTapSeconds.ToString("F2", CultureInfo.InvariantCulture)
@@ -403,7 +535,7 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Modifier key (held while pressing SPACE to allow staging) ─────────────
     private KeyCode modifierKey = KeyCode.BackQuote; // default: ~ (tilde)
-    private StagingBlockerScenario.StagingTriggerMode _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+    private StagingBlockerScenario.StagingTriggerMode _triggerMode = StagingBlockerDefaultsXml.FirstTab;
     private float _holdToStageSeconds = 5.00f;
     private float _doubleTapWindowSeconds = 0.20f;
     private float _holdStartRealtime = -1f;
@@ -430,9 +562,12 @@ public class StagingBlockerFlight : MonoBehaviour
 
     // ── Input lock ID ─────────────────────────────────────────────────────────
     private const string LOCK_ID = "StagingBlocker_SpaceLock";
+    private const string THROTTLE_LOCK_ID = "StagingBlocker_ThrottleLock";
 
     // ── Staging block toggle (global) ─────────────────────────────────────────
-    private bool _stagingBlocked = true;
+    private bool _stagingBlocked = StagingBlockerDefaultsXml.BlockStagingEnabled;
+    private bool _throttleBlocked = StagingBlockerDefaultsXml.BlockThrottleEnabled;
+    private bool _throttleLockApplied = false;
 
     // ── Active vessel tracking (for per-vessel key load/save) ─────────────────
     private string _currentVesselId = null;
@@ -571,6 +706,7 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             modifierKey     = scen.GetModifierKey(_currentVesselId);
             _stagingBlocked = scen.GetStagingBlocked(_currentVesselId);
+            _throttleBlocked = scen.GetThrottleBlocked(_currentVesselId);
             _triggerMode = scen.GetTriggerMode(_currentVesselId);
             _holdToStageSeconds = scen.GetHoldSeconds(_currentVesselId);
             _doubleTapWindowSeconds = scen.GetDoubleTapSeconds(_currentVesselId);
@@ -578,14 +714,16 @@ public class StagingBlockerFlight : MonoBehaviour
         else
         {
             modifierKey     = KeyCode.BackQuote;
-            _stagingBlocked = true;
-            _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
+            _stagingBlocked = StagingBlockerDefaultsXml.BlockStagingEnabled;
+            _throttleBlocked = StagingBlockerDefaultsXml.BlockThrottleEnabled;
+            _triggerMode = StagingBlockerDefaultsXml.FirstTab;
             _holdToStageSeconds = 5.00f;
             _doubleTapWindowSeconds = 0.20f;
         }
         Debug.Log("[StagingBlocker] Loaded vessel \"" + v.vesselName
                   + "\": key=" + modifierKey
                   + ", blocked=" + _stagingBlocked
+                  + ", throttleBlocked=" + _throttleBlocked
                   + ", mode=" + _triggerMode
                   + ", hold=" + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture)
                   + ", doubleTap=" + _doubleTapWindowSeconds.ToString("F2", CultureInfo.InvariantCulture));
@@ -597,12 +735,12 @@ public class StagingBlockerFlight : MonoBehaviour
         if (block)
         {
             InputLockManager.SetControlLock(ControlTypes.STAGING, LOCK_ID);
-            Debug.Log("[StagingBlocker] Staging lock ON — SPACE requires modifier: " + modifierKey);
+            Debug.Log("[StagingBlocker] Staging lock ON — stage command requires modifier: " + modifierKey);
         }
         else
         {
             InputLockManager.RemoveControlLock(LOCK_ID);
-            Debug.Log("[StagingBlocker] Staging lock OFF — SPACE acts normally");
+            Debug.Log("[StagingBlocker] Staging lock OFF — stage command acts normally");
         }
         SaveToScenario();
     }
@@ -646,6 +784,8 @@ public class StagingBlockerFlight : MonoBehaviour
         if (_stagingBlocked)
             HandleBlockedStagingInput();
 
+        UpdateThrottleLock();
+
         // Monitor toolbar button health periodically
         _lastToolbarStatusCheck += Time.deltaTime;
         if (_lastToolbarStatusCheck >= TOOLBAR_STATUS_CHECK_INTERVAL)
@@ -660,7 +800,7 @@ public class StagingBlockerFlight : MonoBehaviour
         // ModifierKey: press modifier + space → stage immediately (no hold timer)
         if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey)
         {
-            if (Input.GetKeyDown(KeyCode.Space) && Input.GetKey(modifierKey))
+            if (IsStageCommandDown() && Input.GetKey(modifierKey))
                 TriggerNextStage();
             return;
         }
@@ -668,7 +808,7 @@ public class StagingBlockerFlight : MonoBehaviour
         // HoldToStage: hold space alone for N seconds (no modifier key needed)
         if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
         {
-            bool spaceHeld = Input.GetKey(KeyCode.Space);
+            bool spaceHeld = IsStageCommandHeld();
             if (spaceHeld)
             {
                 if (_holdStartRealtime < 0f)
@@ -696,7 +836,7 @@ public class StagingBlockerFlight : MonoBehaviour
         // DoubleTap: double-tap space (no modifier key needed)
         if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap)
         {
-            if (!Input.GetKeyDown(KeyCode.Space))
+            if (!IsStageCommandDown())
                 return;
 
             float now = Time.realtimeSinceStartup;
@@ -710,6 +850,65 @@ public class StagingBlockerFlight : MonoBehaviour
                 _lastSpaceTapRealtime = now;
             }
         }
+    }
+
+    bool IsStageCommandHeld()
+    {
+        try
+        {
+            if (GameSettings.LAUNCH_STAGES != null)
+                return GameSettings.LAUNCH_STAGES.GetKey(ignoreInputLock: true);
+        }
+        catch { }
+
+        return Input.GetKey(KeyCode.Space);
+    }
+
+    bool IsStageCommandDown()
+    {
+        try
+        {
+            if (GameSettings.LAUNCH_STAGES != null)
+                return GameSettings.LAUNCH_STAGES.GetKeyDown(ignoreInputLock: true);
+        }
+        catch { }
+
+        return Input.GetKeyDown(KeyCode.Space);
+    }
+
+    void UpdateThrottleLock()
+    {
+        bool shouldBlockThrottle = _throttleBlocked && !Input.GetKey(modifierKey);
+        if (shouldBlockThrottle && !_throttleLockApplied)
+        {
+            InputLockManager.SetControlLock(ControlTypes.THROTTLE | ControlTypes.THROTTLE_CUT_MAX, THROTTLE_LOCK_ID);
+            _throttleLockApplied = true;
+        }
+        else if (!shouldBlockThrottle && _throttleLockApplied)
+        {
+            InputLockManager.RemoveControlLock(THROTTLE_LOCK_ID);
+            _throttleLockApplied = false;
+        }
+
+        // Keep throttle cutoff available as a safety escape even while the
+        // THROTTLE_CUT_MAX control group is locked to block full-throttle.
+        if (shouldBlockThrottle && IsThrottleCutoffCommandDown())
+        {
+            try { FlightInputHandler.state.mainThrottle = 0f; }
+            catch { }
+        }
+    }
+
+    bool IsThrottleCutoffCommandDown()
+    {
+        try
+        {
+            if (GameSettings.THROTTLE_CUTOFF != null)
+                return GameSettings.THROTTLE_CUTOFF.GetKeyDown(ignoreInputLock: true);
+        }
+        catch { }
+
+        return Input.GetKeyDown(KeyCode.X);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -973,6 +1172,7 @@ public class StagingBlockerFlight : MonoBehaviour
         bool isCurrentDefault = scenTop != null
             && modifierKey == scenTop.DefaultKey
             && _stagingBlocked == scenTop.DefaultBlocked
+            && _throttleBlocked == scenTop.DefaultThrottleBlocked
             && _triggerMode == scenTop.DefaultMode
             && Mathf.Abs(_holdToStageSeconds - scenTop.DefaultHoldSeconds) < 0.001f
             && Mathf.Abs(_doubleTapWindowSeconds - scenTop.DefaultDoubleTapSeconds) < 0.001f;
@@ -981,9 +1181,10 @@ public class StagingBlockerFlight : MonoBehaviour
         {
             if (scenTop != null)
             {
-                scenTop.SetDefaults(modifierKey, _stagingBlocked, _triggerMode, _holdToStageSeconds, _doubleTapWindowSeconds);
+                scenTop.SetDefaults(modifierKey, _stagingBlocked, _throttleBlocked, _triggerMode, _holdToStageSeconds, _doubleTapWindowSeconds);
                 Debug.Log("[StagingBlocker] Defaults updated: key=" + modifierKey
                     + ", blocked=" + _stagingBlocked
+                    + ", throttleBlocked=" + _throttleBlocked
                     + ", mode=" + _triggerMode
                     + ", hold=" + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture)
                     + ", doubleTap=" + _doubleTapWindowSeconds.ToString("F2", CultureInfo.InvariantCulture));
@@ -1034,11 +1235,11 @@ public class StagingBlockerFlight : MonoBehaviour
         bool modKeySelected    = _triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey;
         bool holdSelected      = _triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage;
         bool doubleTapSelected = _triggerMode == StagingBlockerScenario.StagingTriggerMode.DoubleTap;
-        if (GUILayout.Toggle(modKeySelected, "Modifier Key", "Button"))
+        if (GUILayout.Toggle(modKeySelected, "Modifier Key", "Button") && !modKeySelected)
             _triggerMode = StagingBlockerScenario.StagingTriggerMode.ModifierKey;
-        if (GUILayout.Toggle(holdSelected, "Hold To Stage", "Button"))
+        if (GUILayout.Toggle(holdSelected, "Hold To Stage", "Button") && !holdSelected)
             _triggerMode = StagingBlockerScenario.StagingTriggerMode.HoldToStage;
-        if (GUILayout.Toggle(doubleTapSelected, "Double Tap", "Button"))
+        if (GUILayout.Toggle(doubleTapSelected, "Double Tap", "Button") && !doubleTapSelected)
             _triggerMode = StagingBlockerScenario.StagingTriggerMode.DoubleTap;
         GUILayout.EndHorizontal();
 
@@ -1055,11 +1256,25 @@ public class StagingBlockerFlight : MonoBehaviour
         GUI.backgroundColor = prevColor;
         GUILayout.EndHorizontal();
 
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Block Throttle:", GUILayout.Width(100));
+        string throttleLabel = _throttleBlocked ? "ENABLED" : "DISABLED";
+        GUI.backgroundColor = _throttleBlocked ? new Color(0.7f, 0.1f, 0.1f) : new Color(0.1f, 0.55f, 0.1f);
+        if (GUILayout.Button(throttleLabel, GUILayout.Width(90)))
+        {
+            _throttleBlocked = !_throttleBlocked;
+            SaveToScenario();
+            UpdateThrottleLock();
+        }
+        GUI.backgroundColor = prevColor;
+        GUILayout.Label(_throttleBlocked ? "Hold modifier for throttle" : "", GUILayout.ExpandWidth(true));
+        GUILayout.EndHorizontal();
+
         if (_stagingBlocked)
         {
             if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.ModifierKey)
             {
-                GUILayout.Label(">> Hold Modifier + SPACE to stage <<", GUI.skin.label);
+                GUILayout.Label(">> Hold Modifier + stage command to stage <<", GUI.skin.label);
                 GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
@@ -1080,7 +1295,7 @@ public class StagingBlockerFlight : MonoBehaviour
             }
             else if (_triggerMode == StagingBlockerScenario.StagingTriggerMode.HoldToStage)
             {
-                GUILayout.Label(">> Hold SPACE for " + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s to stage <<", GUI.skin.label);
+                GUILayout.Label(">> Hold stage command for " + _holdToStageSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s to stage <<", GUI.skin.label);
                 GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
@@ -1091,7 +1306,7 @@ public class StagingBlockerFlight : MonoBehaviour
             }
             else
             {
-                GUILayout.Label(">> Double tap SPACE to stage <<", GUI.skin.label);
+                GUILayout.Label(">> Double tap stage command to stage <<", GUI.skin.label);
                 GUILayout.Space(2);
 
                 GUILayout.BeginHorizontal();
@@ -1134,6 +1349,7 @@ public class StagingBlockerFlight : MonoBehaviour
         scen.showWindow = showWindow;
         scen.SetModifierKey(_currentVesselId, modifierKey);
         scen.SetStagingBlocked(_currentVesselId, _stagingBlocked);
+        scen.SetThrottleBlocked(_currentVesselId, _throttleBlocked);
         scen.SetTriggerMode(_currentVesselId, _triggerMode);
         scen.SetHoldSeconds(_currentVesselId, _holdToStageSeconds);
         scen.SetDoubleTapSeconds(_currentVesselId, _doubleTapWindowSeconds);
@@ -1324,7 +1540,6 @@ public class StagingBlockerFlight : MonoBehaviour
             _tcGO = new GameObject("StagingBlockerToolbar");
             DontDestroyOnLoad(_tcGO);
             _tcButton = (Component)_tcGO.AddComponent(tcType);
-            _tcCreated = true;  // Mark component created
             
             // Only call AddToAllToolbars() once per session to avoid duplicate entries
             if (!_tcToolbarRegistered)
@@ -1369,11 +1584,16 @@ public class StagingBlockerFlight : MonoBehaviour
                         "StagingBlocker/Textures/icon",
                         "Staging Blocker"
                     });
+                    _tcCreated = true;
                     _tcToolbarRegistered = true;
                     Debug.Log("[StagingBlocker] ToolbarController button registered (one-time)");
                 }
                 catch (Exception ex)
                 {
+                    try { Destroy(_tcGO); } catch { }
+                    _tcGO = null;
+                    _tcButton = null;
+                    _tcCreated = false;
                     Debug.LogError("[StagingBlocker] AddToAllToolbars invocation failed: " + ex.Message);
                     return;
                 }
@@ -1445,6 +1665,8 @@ public class StagingBlockerFlight : MonoBehaviour
     {
         // Always remove the staging lock when leaving flight
         InputLockManager.RemoveControlLock(LOCK_ID);
+        InputLockManager.RemoveControlLock(THROTTLE_LOCK_ID);
+        _throttleLockApplied = false;
         Debug.Log("[StagingBlocker] Staging lock removed");
 
         GameEvents.onVesselChange.Remove(OnVesselChange);
